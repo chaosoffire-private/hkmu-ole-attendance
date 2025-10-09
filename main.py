@@ -74,6 +74,13 @@ def create_driver():
     
     # Add proxy bypass for potential issues
     firefox_options.set_preference("network.proxy.type", 0)  # Direct connection, no proxy
+    
+    # Additional stability preferences
+    firefox_options.set_preference("dom.webdriver.enabled", False)
+    firefox_options.set_preference("useAutomationExtension", False)
+    firefox_options.set_preference("dom.disable_beforeunload", True)
+    firefox_options.set_preference("browser.tabs.remote.autostart", False)
+    firefox_options.set_preference("browser.tabs.remote.autostart.2", False)
 
     # Configure seleniumwire options - minimal configuration to avoid proxy issues
     seleniumwire_options = {
@@ -102,12 +109,47 @@ def enter_ole(username, password):
     """Create new driver session and login to OLE"""
     driver = create_driver()
     
-    driver.get(OLE_URL)
+    try:
+        print(f"Navigating to: {OLE_URL}")
+        driver.get(OLE_URL)
+        print(f"Navigation completed. Current URL: {driver.current_url}")
+        print(f"Page title: {driver.title}")
+        
+        # Check if we got redirected or if there's an issue
+        if "404" in driver.title.lower() or "error" in driver.title.lower():
+            print(f"Warning: Page title suggests an error: {driver.title}")
+        
+        # Wait for login page to load and find userid element
+        print("Waiting for login page to load...")
+        userid_element = WebDriverWait(driver, 15).until(
+            lambda d: d.find_element("id", "userid")
+        )
+        print("Login page loaded successfully")
 
-    # Login
-    driver.find_element("id", "userid").send_keys(username)
-    driver.find_element("id", "pwd").send_keys(password)
-    driver.find_element("name", "loginButton2").click()
+        # Login
+        driver.find_element("id", "userid").send_keys(username)
+        driver.find_element("id", "pwd").send_keys(password)
+        driver.find_element("name", "loginButton2").click()
+        print("Login credentials submitted")
+        
+    except TimeoutException:
+        print("Error: Login page did not load properly - userid element not found")
+        print(f"Current URL: {driver.current_url}")
+        print("Page title:", driver.title if driver.title else "No title")
+        # Save page source for debugging
+        try:
+            with open('/tmp/login_page_debug.html', 'w', encoding='utf-8') as f:
+                f.write(driver.page_source)
+            print("Page source saved to /tmp/login_page_debug.html for debugging")
+        except:
+            print("Could not save page source")
+        driver.quit()
+        raise
+    except Exception as e:
+        print(f"Error during login process: {e}")
+        print(f"Current URL: {driver.current_url}")
+        driver.quit()
+        raise
 
     # Wait for page to redirect after login
     print("Waiting for login redirect...")
@@ -426,9 +468,23 @@ def daily_attendance_task():
         print("⚠️ Warning: DISCORD_WEBHOOK not set, notifications disabled")
 
     try:
-        # Create initial driver session for getting classes
+        # Create initial driver session for getting classes with retry logic
         print("- Creating initial driver session...")
-        initial_driver = enter_ole(STUDENT_ID, STUDENT_PASSWORD)
+        initial_driver = None
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                print(f"  Login attempt {attempt + 1}/{max_retries}")
+                initial_driver = enter_ole(STUDENT_ID, STUDENT_PASSWORD)
+                print("  Login successful!")
+                break
+            except Exception as login_error:
+                print(f"  Login attempt {attempt + 1} failed: {login_error}")
+                if attempt == max_retries - 1:
+                    raise login_error
+                print(f"  Retrying in 10 seconds...")
+                time.sleep(10)
 
         # get json data for classes
         print("- Retrieving today's classes...")
