@@ -1,0 +1,20 @@
+{
+    "result": 1,
+    "classes": [
+        {
+            "termcode": "2504",
+            "course_code": "COMP3200SEF",
+            "classes": [
+                {
+                    "name": "Lecture ( Full Time )",
+                    "datetime": "2025-10-09 09:00",
+                    "endtime": "2025-10-09 10:50",
+                    "group": "L01",
+                    "venue": "IOH F0201",
+                    "host": "thluk"
+                }
+            ]
+        }
+    ],
+    "is_cc": false
+}
