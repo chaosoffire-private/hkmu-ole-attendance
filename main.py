@@ -196,38 +196,55 @@ def getTodayClasses(driver, url):
 
 def send_classes(classes):
     """Send Discord webhook notification about today's classes"""
+    today = get_hk_time().date()  # Get today's date in Hong Kong timezone
+    today_classes_found = False
+    
     if classes and classes.get("result") == 1:
         class_list = classes.get("classes", [])
         if class_list:
             message = "**Retrieved Classes:**\n"
             message += f"`System Time: {get_hk_time().strftime('%Y-%m-%d %H:%M:%S %Z')}`\n\n"
+            
             for course in class_list:
                 course_code = course.get("course_code", "Unknown Course")
                 for class_session in course.get("classes", []):
                     class_name = class_session.get("name", "Unknown Class")
-                    datetime = class_session.get("datetime", "Unknown Time")
+                    datetime_str = class_session.get("datetime", "Unknown Time")
                     endtime = class_session.get("endtime", "")
                     venue = class_session.get("venue", "Unknown Venue")
                     group = class_session.get("group", "")
                     
-                    # Format time nicely
-                    if datetime:
+                    # Only include classes for today
+                    if datetime_str and datetime_str != "Unknown Time":
                         try:
-                            start_time = datetime.split(" ")[1]  # Get time part
+                            class_datetime = parse_class_time(datetime_str)
+                            if not class_datetime:
+                                continue
+                            
+                            # Skip classes that are not today
+                            if class_datetime.date() != today:
+                                continue
+                                
+                            today_classes_found = True
+                            
+                            # Format time nicely
+                            start_time = datetime_str.split(" ")[1]  # Get time part
                             end_time = endtime.split(" ")[1] if endtime else ""
                             time_range = f"{start_time} - {end_time}" if end_time else start_time
-                        except:
-                            time_range = datetime
-                    else:
-                        time_range = "Unknown Time"
-                    
-                    message += f"> **{course_code}** - {class_name}\n"
-                    message += f">  TIME: {time_range}\n"
-                    message += f">  VENUE: {venue}"
-                    if group:
-                        message += f" ({group})"
-                    message += "\n\n"
-
+                            
+                            message += f"> **{course_code}** - {class_name}\n"
+                            message += f">  TIME: {time_range}\n"
+                            message += f">  VENUE: {venue}"
+                            if group:
+                                message += f" ({group})"
+                            message += "\n"
+                            
+                        except Exception as e:
+                            print(f"Error processing class {course_code} for Discord: {e}")
+                            continue
+            
+            if not today_classes_found:
+                message = "No classes scheduled for today!"
         else:
             message = "No classes scheduled for today!"
     else:
@@ -254,6 +271,7 @@ def send_classes(classes):
 def schedule_attendance(classes, username, password):
     """Parse classes and schedule attendance marking"""
     scheduled_classes = []
+    today = get_hk_time().date()  # Get today's date in Hong Kong timezone
     
     if classes and classes.get("result") == 1:
         class_list = classes.get("classes", [])
@@ -275,6 +293,11 @@ def schedule_attendance(classes, username, password):
                         if not class_datetime:
                             continue
                         
+                        # Only process classes for today
+                        if class_datetime.date() != today:
+                            print(f"Skipping {course_code} - not today's class ({class_datetime.date()})")
+                            continue
+                        
                         class_endtime = None
                         if endtime_str:
                             class_endtime = parse_class_time(endtime_str)
@@ -289,7 +312,7 @@ def schedule_attendance(classes, username, password):
                             "endtime": class_endtime,
                             "group": group,
                             "venue": venue,
-                            "url": f"https://iole.hkmu.edu.hk/{termcode}/{course_code}.nsf//class_activities_student?readform&"
+                            "url": f"https://iole.hkmu.edu.hk/course{termcode}/{course_code}.nsf//class_activities_student?readform&"
                         }
                         
                         scheduled_classes.append(class_info)
@@ -299,7 +322,7 @@ def schedule_attendance(classes, username, password):
                         print(f"Error parsing datetime for {course_code}: {e}")
     
     print(f"\nTotal scheduled classes: {len(scheduled_classes)}")
-    print(f"🕐 Current System Time (HKT): {get_hk_time().strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    print(f"Current System Time (HKT): {get_hk_time().strftime('%Y-%m-%d %H:%M:%S %Z')}")
     
     # Schedule attendance for each class
     for class_info in scheduled_classes:
@@ -308,10 +331,18 @@ def schedule_attendance(classes, username, password):
 def schedule_class_attendance(class_info, username, password):
     """Schedule attendance marking for a specific class"""
     class_time = class_info["datetime"]
+    class_endtime = class_info.get("endtime")
     current_time = get_hk_time()
     
-    print(f"🕐 System Time: {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-    print(f"📅 Class Time: {class_time.strftime('%Y-%m-%d %H:%M:%S %Z') if hasattr(class_time, 'tzinfo') and class_time.tzinfo else class_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"System Time: {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    print(f"Class Time: {class_time.strftime('%Y-%m-%d %H:%M:%S %Z') if hasattr(class_time, 'tzinfo') and class_time.tzinfo else class_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # If no endtime specified, default to 3 hours after class start
+    if not class_endtime:
+        class_endtime = class_time + timedelta(hours=3)
+        print(f"Class End Time (estimated): {class_endtime.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    else:
+        print(f"Class End Time: {class_endtime.strftime('%Y-%m-%d %H:%M:%S %Z') if hasattr(class_endtime, 'tzinfo') and class_endtime.tzinfo else class_endtime.strftime('%Y-%m-%d %H:%M:%S')}")
     
     # Calculate delay until class starts
     delay = (class_time - current_time).total_seconds()
@@ -323,13 +354,27 @@ def schedule_class_attendance(class_info, username, password):
         timer = threading.Timer(delay, mark_attendance, args=[class_info, username, password])
         timer.daemon = True
         timer.start()
+    elif current_time <= class_endtime:
+        # Class has started but hasn't ended yet - attempt attendance immediately
+        minutes_since_start = (current_time - class_time).total_seconds() / 60
+        minutes_until_end = (class_endtime - current_time).total_seconds() / 60
+        print(f"Class {class_info['course_code']} is IN PROGRESS!")
+        print(f"   Started {minutes_since_start:.0f} minutes ago, ends in {minutes_until_end:.0f} minutes")
+        print(f"   Attempting attendance immediately...")
+        
+        # Start attendance marking immediately in a separate thread
+        attendance_thread = threading.Thread(target=mark_attendance, args=[class_info, username, password])
+        attendance_thread.daemon = True
+        attendance_thread.start()
     else:
-        print(f"Class {class_info['course_code']} has already started or passed")
+        # Class has already ended
+        minutes_since_end = (current_time - class_endtime).total_seconds() / 60
+        print(f"Class {class_info['course_code']} has already ENDED {minutes_since_end:.0f} minutes ago")
 
 def mark_attendance(class_info, username, password):
     """Mark attendance for a specific class"""
-    print(f"\n🎯 Starting attendance for {class_info['course_code']} - {class_info['class_name']}")
-    print(f"🕐 Attendance Start Time: {get_hk_time().strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    print(f"\nStarting attendance for {class_info['course_code']} - {class_info['class_name']}")
+    print(f"Attendance Start Time: {get_hk_time().strftime('%Y-%m-%d %H:%M:%S %Z')}")
     
     # Create new driver session and login to OLE
     driver = None
@@ -340,7 +385,11 @@ def mark_attendance(class_info, username, password):
         print(f"Navigating to: {class_url}")
         driver.get(class_url)
         
-        # Try to find "present" every 10 minutes until class endtime
+        # Wait for page to load before checking for attendance elements
+        print("Waiting for page to load...")
+        time.sleep(15)  # Wait 15 seconds for page to fully load
+        
+        # Try to find submitted_msg element every 10 minutes until class endtime
         current_time = get_hk_time()
         class_endtime = class_info.get("endtime")
         
@@ -348,56 +397,61 @@ def mark_attendance(class_info, username, password):
         if not class_endtime:
             class_endtime = class_info["datetime"] + timedelta(hours=3)
         
-        print(f"Will check for attendance until: {class_endtime}")
-        print(f"🕐 Current Time: {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+        print(f"Will check for attendance submission until: {class_endtime}")
+        print(f"Current Time: {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
         attempt = 0
         warning_sent = False  # Track if we've sent the 30-minute warning
         
         while current_time < class_endtime:
             try:
-                print(f"Attempt {attempt + 1}: Checking if 'present' exists on page...")
+                print(f"Attempt {attempt + 1}: Checking if attendance has been submitted...")
                 
-                # Check if the word "present" exists anywhere on the page
-                page_source = driver.page_source.lower()
+                # Wait a moment for any dynamic content to load
+                time.sleep(3)  # Wait 3 seconds before checking elements
                 
-                if "present" in page_source:
-                    print(f"Found word 'present' on the page!")
+                # Check if the submitted_msg element exists on the page
+                try:
+                    submitted_element = driver.find_element("id", "submitted_msg")
+                    print(f"Found attendance confirmation element (submitted_msg)!")
                     
                     # Send success notification
-                    success_message = f"**Attendance Checked!**\n"
-                    success_message += f"Course: {class_info['course_code']}\n"
-                    success_message += f"Class: {class_info['class_name']}\n"
-                    success_message += f"Time: {get_hk_time().strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
-                    success_message += f"Status: Word 'present' found on attendance page"
+                    success_message = f"**- Attendance Confirmed!**\n"
+                    success_message += f"> Course: {class_info['course_code']}\n"
+                    success_message += f"> Class: {class_info['class_name']}\n"
+                    success_message += f"> Time: {get_hk_time().strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
+                    success_message += f"> Status: Attendance successfully submitted"
                     
                     send_discord_notification(success_message)
                     
-                    print(f"'Present' found for {class_info['course_code']}")
+                    print(f"Attendance confirmed for {class_info['course_code']}")
                     break
-                else:
-                    # Check if we're in the last 30 minutes and haven't sent warning yet
-                    time_remaining = (class_endtime - current_time).total_seconds()
-                    minutes_remaining = time_remaining / 60
                     
-                    if minutes_remaining <= 30 and not warning_sent:
-                        print(f"⚠️ WARNING: Only {minutes_remaining:.0f} minutes left in class!")
-                        
-                        # Send warning notification
-                        warning_message = f"⚠️ **ATTENDANCE WARNING**\n"
-                        warning_message += f"Course: {class_info['course_code']}\n"
-                        warning_message += f"Class: {class_info['class_name']}\n"
-                        warning_message += f"Only {minutes_remaining:.0f} minutes remaining!\n"
-                        warning_message += f"Still searching for 'present' on attendance page\n"
-                        warning_message += f"Attempts so far: {attempt + 1}"
-                        
-                        send_discord_notification(warning_message)
-                        warning_sent = True
+                except NoSuchElementException:
+                    print(f"Attendance not yet submitted (submitted_msg element not found)")
+                # Check if we're in the last 30 minutes and haven't sent warning yet
+                time_remaining = (class_endtime - current_time).total_seconds()
+                minutes_remaining = time_remaining / 60
+                
+                if minutes_remaining <= 30 and not warning_sent:
+                    print(f"- WARNING: Only {minutes_remaining:.0f} minutes left in class!")
                     
-                    print(f"Word 'present' not found on page, waiting 10 minutes... ({minutes_remaining:.0f} minutes left)")
-                    time.sleep(600)  # Wait 10 minutes
-                    driver.refresh()  # Refresh the page
-                    attempt += 1
-                    current_time = get_hk_time()  # Update current time
+                    # Send warning notification
+                    warning_message = f"**- ATTENDANCE WARNING**\n"
+                    warning_message += f"> Course: {class_info['course_code']}\n"
+                    warning_message += f"> Class: {class_info['class_name']}\n"
+                    warning_message += f"> Only {minutes_remaining:.0f} minutes remaining!\n"
+                    warning_message += f"> Attempts so far: {attempt + 1}"
+                    
+                    send_discord_notification(warning_message)
+                    warning_sent = True
+                
+                print(f"Attendance not submitted yet, waiting 10 minutes... ({minutes_remaining:.0f} minutes left)")
+                time.sleep(600)  # Wait 10 minutes
+                driver.refresh()  # Refresh the page
+                print("Page refreshed, waiting for reload...")
+                time.sleep(10)  # Wait 10 seconds after refresh for page to reload
+                attempt += 1
+                current_time = get_hk_time()  # Update current time
                     
             except Exception as e:
                 print(f"Error during attendance attempt {attempt + 1}: {e}")
@@ -407,13 +461,13 @@ def mark_attendance(class_info, username, password):
                 minutes_remaining = time_remaining / 60
                 
                 if minutes_remaining <= 30 and not warning_sent:
-                    print(f"⚠️ WARNING: Only {minutes_remaining:.0f} minutes left in class!")
+                    print(f"- WARNING: Only {minutes_remaining:.0f} minutes left in class!")
                     
                     # Send warning notification
-                    warning_message = f"**ATTENDANCE WARNING**\n"
-                    warning_message += f"Course: {class_info['course_code']}\n"
-                    warning_message += f"Class: {class_info['class_name']}\n"
-                    warning_message += f"Only {minutes_remaining:.0f} minutes remaining!\n"
+                    warning_message = f"**- ATTENDANCE WARNING**\n"
+                    warning_message += f"> Course: {class_info['course_code']}\n"
+                    warning_message += f"> Class: {class_info['class_name']}\n"
+                    warning_message += f"> Only {minutes_remaining:.0f} minutes remaining!\n"
                     warning_message += f"ERROR occurred during attempt {attempt + 1}\n"
                     warning_message += f"Total attempts: {attempt + 1}"
                     
@@ -424,21 +478,21 @@ def mark_attendance(class_info, username, password):
                 time.sleep(600)  # Wait 10 minutes before retry
                 current_time = get_hk_time()  # Update current time
         
-        # Send failure notification if time exceeded without finding "present"
+        # Send failure notification if time exceeded without finding submitted_msg
         if current_time >= class_endtime:
-            fail_message = f"**Attendance FAILED**\n"
-            fail_message += f"Course: {class_info['course_code']}\n"
-            fail_message += f"Word 'present' not found on page until class end time ({class_endtime})\n"
-            fail_message += f"Total attempts: {attempt}"
+            fail_message = f"**- Attendance FAILED**\n"
+            fail_message += f"> Course: {class_info['course_code']}\n"
+            fail_message += f"> Status: Attendance submission not confirmed by end of class\n"
+            fail_message += f"> Total attempts: {attempt}"
             
             send_discord_notification(fail_message)
             
     except Exception as e:
         print(f"Error marking attendance for {class_info['course_code']}: {e}")
         
-        error_message = f"**Attendance ERROR**\n"
-        error_message += f"Course: {class_info['course_code']}\n"
-        error_message += f"Error: {str(e)}"
+        error_message = f"**- Attendance ERROR**\n"
+        error_message += f"> Course: {class_info['course_code']}\n"
+        error_message += f"`Error: {str(e)}`"
         
         send_discord_notification(error_message)
     
@@ -465,7 +519,7 @@ def daily_attendance_task():
         return
     
     if not DISCORD_WEBHOOK:
-        print("⚠️ Warning: DISCORD_WEBHOOK not set, notifications disabled")
+        print("Warning: DISCORD_WEBHOOK not set, notifications disabled")
 
     try:
         # Create initial driver session for getting classes with retry logic
@@ -508,7 +562,7 @@ def daily_attendance_task():
     except Exception as e:
         print(f"- ERROR during daily setup: {e}")
         
-        error_message = f"🚨 **Daily Setup Error**\n"
+        error_message = f"**Daily Setup Error**\n"
         error_message += f"Date: {get_hk_time().strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
         error_message += f"Error: {str(e)}"
         
