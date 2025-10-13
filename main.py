@@ -167,6 +167,71 @@ def enter_ole(username, password):
     
     return driver
 
+def filter_today_classes(json_data):
+    """Filter classes to only include those scheduled for today"""
+    if not json_data:
+        print("No JSON data to filter")
+        return json_data
+    
+    # If the result is not successful, return as-is
+    if json_data.get("result") != 1:
+        print(f"API result is not successful (result: {json_data.get('result')}), returning unfiltered data")
+        return json_data
+    
+    today_date = get_hk_time().date()
+    print(f"Filtering classes for today's date: {today_date}")
+    
+    filtered_classes = []
+    original_count = 0
+    filtered_count = 0
+    
+    classes_list = json_data.get("classes", [])
+    if not classes_list:
+        print("No classes found in the response")
+        return json_data
+    
+    for course in classes_list:
+        filtered_course = {
+            "termcode": course.get("termcode", ""),
+            "course_code": course.get("course_code", ""),
+            "classes": []
+        }
+        
+        for class_session in course.get("classes", []):
+            original_count += 1
+            datetime_str = class_session.get("datetime", "")
+            
+            if datetime_str:
+                class_datetime = parse_class_time(datetime_str)
+
+                if class_datetime:
+                    class_date = class_datetime.date()
+                    
+                    # is the class today
+                    if class_date == today_date:
+                        filtered_course["classes"].append(class_session)
+                        filtered_count += 1
+                        print(f"✓ Keeping class: {course.get('course_code')} - {class_session.get('name')} at {datetime_str}")
+                    else:
+                        print(f"✗ Filtering out class: {course.get('course_code')} - {class_session.get('name')} at {datetime_str} (not today)")
+                else:
+                    print(f"⚠ Warning: Could not parse datetime for class: {course.get('course_code')} - {datetime_str}")
+            else:
+                print(f"⚠ Warning: No datetime found for class: {course.get('course_code')} - {class_session.get('name')}")
+        
+        if filtered_course["classes"]:
+            filtered_classes.append(filtered_course)
+    
+    print(f"Filtered classes: {filtered_count}/{original_count} classes are for today")
+    
+    # Return the filtered data with the same structure
+    filtered_data = {
+        "result": json_data.get("result", 0),
+        "classes": filtered_classes
+    }
+    
+    return filtered_data
+
 def getTodayClasses(driver, url):
     print(f"\nSearching for XHR request to: {url}")
     
@@ -187,7 +252,10 @@ def getTodayClasses(driver, url):
                 body = target_request.response.body.decode('utf-8')
                 json_data = json.loads(body)
                 print(f"Response: {json.dumps(json_data, indent=2)}")
-                return json_data
+                
+                # Filter classes to only include today's classes
+                filtered_data = filter_today_classes(json_data)
+                return filtered_data
                 
             except json.JSONDecodeError:
                 print(f"Response Body (not JSON): {body}")
