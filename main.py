@@ -264,9 +264,7 @@ def getTodayClasses(driver, url):
 
 def send_classes(classes):
     """Send Discord webhook notification about today's classes"""
-    today = get_hk_time().date()  # Get today's date in Hong Kong timezone
-    today_classes_found = False
-    
+    # Classes are already filtered for today by filter_today_classes function
     if classes and classes.get("result") == 1:
         class_list = classes.get("classes", [])
         if class_list:
@@ -282,20 +280,9 @@ def send_classes(classes):
                     venue = class_session.get("venue", "Unknown Venue")
                     group = class_session.get("group", "")
                     
-                    # Only include classes for today
+                    # Format time nicely
                     if datetime_str and datetime_str != "Unknown Time":
                         try:
-                            class_datetime = parse_class_time(datetime_str)
-                            if not class_datetime:
-                                continue
-                            
-                            # Skip classes that are not today
-                            if class_datetime.date() != today:
-                                continue
-                                
-                            today_classes_found = True
-                            
-                            # Format time nicely
                             start_time = datetime_str.split(" ")[1]  # Get time part
                             end_time = endtime.split(" ")[1] if endtime else ""
                             time_range = f"{start_time} - {end_time}" if end_time else start_time
@@ -310,9 +297,6 @@ def send_classes(classes):
                         except Exception as e:
                             print(f"Error processing class {course_code} for Discord: {e}")
                             continue
-            
-            if not today_classes_found:
-                message = "No classes scheduled for today!"
         else:
             message = "No classes scheduled for today!"
     else:
@@ -339,7 +323,7 @@ def send_classes(classes):
 def schedule_attendance(classes, username, password):
     """Parse classes and schedule attendance marking"""
     scheduled_classes = []
-    today = get_hk_time().date()  # Get today's date in Hong Kong timezone
+    # Classes are already filtered for today by filter_today_classes function
     
     if classes and classes.get("result") == 1:
         class_list = classes.get("classes", [])
@@ -359,11 +343,6 @@ def schedule_attendance(classes, username, password):
                     try:
                         class_datetime = parse_class_time(datetime_str)
                         if not class_datetime:
-                            continue
-                        
-                        # Only process classes for today
-                        if class_datetime.date() != today:
-                            print(f"Skipping {course_code} - not today's class ({class_datetime.date()})")
                             continue
                         
                         class_endtime = None
