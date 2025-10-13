@@ -211,13 +211,13 @@ def filter_today_classes(json_data):
                     if class_date == today_date:
                         filtered_course["classes"].append(class_session)
                         filtered_count += 1
-                        print(f"✓ Keeping class: {course.get('course_code')} - {class_session.get('name')} at {datetime_str}")
+                        print(f"Keeping class: {course.get('course_code')} - {class_session.get('name')} at {datetime_str}")
                     else:
-                        print(f"✗ Filtering out class: {course.get('course_code')} - {class_session.get('name')} at {datetime_str} (not today)")
+                        print(f"Filtering out class: {course.get('course_code')} - {class_session.get('name')} at {datetime_str} (not today)")
                 else:
-                    print(f"⚠ Warning: Could not parse datetime for class: {course.get('course_code')} - {datetime_str}")
+                    print(f"Warning: Could not parse datetime for class: {course.get('course_code')} - {datetime_str}")
             else:
-                print(f"⚠ Warning: No datetime found for class: {course.get('course_code')} - {class_session.get('name')}")
+                print(f"Warning: No datetime found for class: {course.get('course_code')} - {class_session.get('name')}")
         
         if filtered_course["classes"]:
             filtered_classes.append(filtered_course)
@@ -406,8 +406,8 @@ def schedule_class_attendance(class_info, username, password):
         minutes_since_start = (current_time - class_time).total_seconds() / 60
         minutes_until_end = (class_endtime - current_time).total_seconds() / 60
         print(f"Class {class_info['course_code']} is IN PROGRESS!")
-        print(f"   Started {minutes_since_start:.0f} minutes ago, ends in {minutes_until_end:.0f} minutes")
-        print(f"   Attempting attendance immediately...")
+        print(f"Started {minutes_since_start:.0f} minutes ago, ends in {minutes_until_end:.0f} minutes")
+        print(f"Attempting attendance immediately...")
         
         # Start attendance marking immediately in a separate thread
         attendance_thread = threading.Thread(target=mark_attendance, args=[class_info, username, password])
