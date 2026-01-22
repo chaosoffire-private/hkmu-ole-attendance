@@ -262,7 +262,7 @@ def getTodayClasses(driver, url):
     else:
         print("ERROR!!!! No getTodayClass request found!")
 
-def send_classes(classes):
+def send_classes(classes, retries=0):
     """Send Discord webhook notification about today's classes"""
     # Classes are already filtered for today by filter_today_classes function
     if classes and classes.get("result") == 1:
@@ -300,7 +300,14 @@ def send_classes(classes):
         else:
             message = "No classes scheduled for today!"
     else:
-        message = "Failed to retrieve class information"
+        # 3 tries
+        if retries <= 3:
+            print(f"Retrying fetching classes in 30 seconds, attempt {retries + 1}")
+            time.sleep(30)
+            daily_attendance_task(retries + 1)
+            return
+        else:
+            message = "Failed to retrieve class information"
     
     # Only send to Discord if webhook is configured
     if not DISCORD_WEBHOOK:
@@ -553,12 +560,8 @@ def mark_attendance(class_info, username, password):
 
 
 
-def daily_attendance_task():
+def daily_attendance_task(retries=0):
     """Main function that runs daily at 3 AM to set up attendance for the day"""
-    print(f"\n{'='*60}")
-    print(f"- DAILY ATTENDANCE SETUP - {get_hk_time().strftime('%Y-%m-%d %H:%M:%S %Z')}")
-    print(f"{'='*60}")
-    
     if not STUDENT_ID or not STUDENT_PASSWORD:
         error_msg = "MISSING required environment variables: STUDENT_ID and/or STUDENT_PASSWORD"
         print(error_msg)
@@ -597,14 +600,11 @@ def daily_attendance_task():
         
         # Send classes to Discord
         print("- Sending class notification to Discord...")
-        send_classes(classes)
+        send_classes(classes, retries)
 
         # Schedule
         print("- Scheduling attendance for today's classes...")
         schedule_attendance(classes, STUDENT_ID, STUDENT_PASSWORD)
-        
-        print(f"- Daily setup completed successfully!")
-        print(f"{'='*60}\n")
         
     except Exception as e:
         print(f"- ERROR during daily setup: {e}")
