@@ -1,6 +1,7 @@
 selenium-wire>=5.1.0
 requests>=2.32.5
 blinker==1.6.3 # requires older version because selenium wire
+pyOpenSSL<26.2 # 26.2.0 removed X509.get_extension which selenium wire's mitmproxy still uses
 schedule>=1.2.2
 python-dotenv>=1.1.1
 pytz>=2025.2
