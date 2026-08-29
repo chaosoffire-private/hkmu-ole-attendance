@@ -14,7 +14,7 @@ def send_discord_notification(message):
         return True
 
     try:
-        response = requests.post(DISCORD_WEBHOOK, json={"content": message})
+        response = requests.post(DISCORD_WEBHOOK, json={"content": message}, timeout=10)
         if response.status_code == 204:
             logger.info("Discord notification sent successfully")
             return True
