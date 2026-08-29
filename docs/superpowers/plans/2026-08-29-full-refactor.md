@@ -490,6 +490,9 @@ def create_driver():
     firefox_options.add_argument("--window-size=1920,1080")
 
     firefox_options.set_preference("network.proxy.type", 0)
+    # Firefox's JSON viewer would replace the raw body when navigating
+    # straight to the API URL, breaking the fallback fetch path
+    firefox_options.set_preference("devtools.jsonview.enabled", False)
     firefox_options.set_preference("dom.webdriver.enabled", False)
     firefox_options.set_preference("useAutomationExtension", False)
     firefox_options.set_preference("dom.disable_beforeunload", True)
