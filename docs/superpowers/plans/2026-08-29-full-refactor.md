@@ -138,7 +138,9 @@ def send_discord_notification(message):
         return True
 
     try:
-        response = requests.post(DISCORD_WEBHOOK, json={"content": message})
+        # timeout added during review: a hung Discord endpoint must fail the
+        # notification (return False), not block the calling thread forever
+        response = requests.post(DISCORD_WEBHOOK, json={"content": message}, timeout=10)
         if response.status_code == 204:
             logger.info("Discord notification sent successfully")
             return True
