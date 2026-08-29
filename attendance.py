@@ -144,6 +144,9 @@ def mark_attendance(class_info, username, password):
         logger.info("Will check for attendance submission until: %s", class_endtime)
         attempt = 0
         warning_sent = False
+        # guards the FAILED message: a success in the final seconds of class
+        # must never be followed by a spurious FAILED notification
+        confirmed = False
 
         while get_hk_time() < class_endtime:
             try:
@@ -169,6 +172,7 @@ def mark_attendance(class_info, username, password):
                     logger.info(
                         "Attendance confirmed for %s", class_info["course_code"]
                     )
+                    confirmed = True
                     break
                 except NoSuchElementException:
                     logger.info(
@@ -205,7 +209,7 @@ def mark_attendance(class_info, username, password):
                 attempt += 1
                 time.sleep(ATTENDANCE_POLL_INTERVAL)
 
-        if get_hk_time() >= class_endtime:
+        if not confirmed and get_hk_time() >= class_endtime:
             fail_message = "**- Attendance FAILED**\n"
             fail_message += f"> Course: {class_info['course_code']}\n"
             fail_message += (
