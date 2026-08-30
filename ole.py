@@ -8,6 +8,7 @@ from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 
 from config import (
+    DASHBOARD_LOAD_TIMEOUT,
     FETCH_MAX_ATTEMPTS,
     FETCH_RETRY_DELAY,
     LOGIN_PAGE_TIMEOUT,
@@ -23,7 +24,12 @@ logger = logging.getLogger(__name__)
 FETCH_SCRIPT = """
 const url = arguments[0];
 const done = arguments[arguments.length - 1];
-fetch(url, {credentials: 'include'})
+fetch(url, {
+    credentials: 'include',
+    // without the XHR marker the API answers {"error": "9901",
+    // "errormsg": "The API is only for web users."}
+    headers: {'X-Requested-With': 'XMLHttpRequest'}
+})
     .then(r => r.text())
     .then(text => done({ok: true, body: text}))
     .catch(err => done({ok: false, error: String(err)}));
@@ -101,6 +107,19 @@ def login(driver, username, password):
     except Exception as e:
         logger.warning("Redirect timeout or error: %s", e)
 
+    # The SSO redirect chain lands on a transient page before the dashboard;
+    # the oleconnect API session is only established once the dashboard loads,
+    # so fetching (or navigating) earlier gets rejected or races an unload.
+    logger.info("Waiting for OLE dashboard to load...")
+    try:
+        WebDriverWait(driver, DASHBOARD_LOAD_TIMEOUT).until(
+            lambda d: "myOLE.nsf" in d.current_url
+            and d.execute_script("return document.readyState") == "complete"
+        )
+        logger.info("Dashboard loaded: %s", driver.current_url)
+    except Exception as e:
+        logger.warning("Dashboard load wait gave up: %s (continuing)", e)
+
 
 def enter_ole(username, password):
     """Create a new driver session and login to OLE"""
@@ -141,21 +160,29 @@ def _fetch_by_navigation(driver):
 
 
 def fetch_today_classes(driver):
-    """Fetch today's class JSON. Returns a dict, or None if all attempts fail."""
+    """Fetch today's class JSON. Retries until the API reports success
+    (result == 1); returns the last payload (or None) after all attempts,
+    so callers can still report the API's own error."""
+    last_data = None
     for attempt in range(1, FETCH_MAX_ATTEMPTS + 1):
         logger.info(
             "Fetching today's classes (attempt %d/%d)", attempt, FETCH_MAX_ATTEMPTS
         )
         data = _fetch_in_page(driver)
         if data is None:
+            # navigation moves the page off the dashboard, so only fall back
+            # when the in-page transport itself failed, not on an API error
             data = _fetch_by_navigation(driver)
-        if data is not None:
-            logger.info("Fetched class data: %s", json.dumps(data, indent=2))
-            return data
+        if isinstance(data, dict):
+            last_data = data
+            if data.get("result") == 1:
+                logger.info("Fetched class data: %s", json.dumps(data, indent=2))
+                return data
+            logger.warning("API returned unsuccessful payload: %s", json.dumps(data))
         if attempt < FETCH_MAX_ATTEMPTS:
             time.sleep(FETCH_RETRY_DELAY)
 
     logger.error(
-        "Failed to fetch today's classes after %d attempts", FETCH_MAX_ATTEMPTS
+        "No successful class payload after %d attempts", FETCH_MAX_ATTEMPTS
     )
-    return None
+    return last_data
