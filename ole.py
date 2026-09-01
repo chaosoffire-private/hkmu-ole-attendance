@@ -59,6 +59,15 @@ def create_driver():
     firefox_options.set_preference("browser.tabs.remote.autostart", False)
     firefox_options.set_preference("browser.tabs.remote.autostart.2", False)
 
+    # auto-grant geolocation with a fixed position (Pyongyang); headless
+    # Firefox can't show the permission prompt, so requests would hang
+    firefox_options.set_preference("permissions.default.geo", 1)
+    firefox_options.set_preference(
+        "geo.provider.network.url",
+        'data:application/json,{"location": {"lat": 39.0392, "lng": 125.7625},'
+        ' "accuracy": 20}',
+    )
+
     driver = webdriver.Firefox(options=firefox_options)
     logger.info("WebDriver initialized successfully")
     return driver
