@@ -1,0 +1,120 @@
+[package]
+name = "hkmu-ole-attendance"
+version = "0.3.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Automatic class-activity attendance for HKMU's Online Learning Environment (OLE)"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/avanavan/hkmu-ole-attendance"
+keywords = ["hkmu", "ole", "attendance", "automation"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+anyhow = "1"
+base64 = "0.23"
+clap = { version = "4", features = ["derive", "env"] }
+dotenvy = "0.15"
+jiff = { version = "0.2", features = ["serde", "tzdb-bundle-always"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+    "gzip",
+    "brotli",
+    "charset",
+    "http2",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "time",
+    "signal",
+    "sync",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_must_use = "deny"
+elided_lifetimes_in_paths = "warn"
+non_ascii_idents = "deny"
+trivial_numeric_casts = "warn"
+unused_lifetimes = "warn"
+single_use_lifetimes = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+indexing_slicing = "deny"
+mem_forget = "deny"
+arithmetic_side_effects = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_precision_loss = "warn"
+cast_sign_loss = "warn"
+as_underscore = "deny"
+as_ptr_cast_mut = "deny"
+ptr_as_ptr = "warn"
+borrow_as_ptr = "warn"
+fn_to_numeric_cast_any = "deny"
+clone_on_ref_ptr = "warn"
+mutex_atomic = "warn"
+rc_buffer = "warn"
+rc_mutex = "warn"
+exit = "warn"
+allow_attributes_without_reason = "warn"
+dbg_macro = "warn"
+print_stderr = "warn"
+print_stdout = "warn"
+use_debug = "warn"
+empty_drop = "warn"
+empty_structs_with_brackets = "warn"
+empty_enums = "warn"
+mod_module_files = "warn"
+
+# Project opinions: these fire on idiomatic code in this codebase.
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+implicit_hasher = "allow"
+ref_option = "allow"
+# A library-oriented pedantic lint. On this application crate it fires ~50
+# times on plain getters, which made the source noisy for no benefit.
+# `unused_must_use = "deny"` above still catches a genuinely dropped Result.
+must_use_candidate = "allow"
+# Transitive duplication inside reqwest/tokio is not actionable here.
+multiple_crate_versions = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+debug = "line-tables-only"
+
+[profile.dev]
+opt-level = 0
+debug = true
+incremental = true

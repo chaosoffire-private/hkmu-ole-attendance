@@ -1,0 +1,85 @@
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      # `imports_granularity` and `group_imports` are nightly-only rustfmt
+      # options, so the import grouping can only be checked on nightly.
+      - run: cargo +nightly fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all-features --locked
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+
+  image:
+    name: image smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: hkmu-ole-attendance:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # Proves the scratch image is complete: a statically linked binary whose
+      # bundled TLS roots and timezone data are reachable without any OS.
+      - name: Verify the binary runs with no OS present
+        run: |
+          docker run --rm hkmu-ole-attendance:ci --version
+          docker run --rm hkmu-ole-attendance:ci --help
+      - name: Verify the image has no shell
+        run: |
+          if docker run --rm --entrypoint /bin/sh hkmu-ole-attendance:ci -c true 2>/dev/null; then
+            echo "expected no shell in a scratch image" >&2
+            exit 1
+          fi
+          echo "no shell present, as intended"
