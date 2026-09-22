@@ -1,5 +1,10 @@
 # Full Refactor Implementation Plan
 
+> **Historical.** This describes the earlier **Python** implementation
+> (`main.py`, Selenium/`selenium-wire`) and is kept for reference only. The
+> project has since been rewritten in Rust; see [`README.md`](../../../README.md)
+> for the current architecture.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Split the 635-line `main.py` into six focused modules, remove the abandoned `selenium-wire` dependency (replacing XHR sniffing with an in-page `fetch`), fix the `send_classes`→`daily_attendance_task` retry recursion, replace `print` with `logging`, and honor the `SCHEDULE_TIME` env var.

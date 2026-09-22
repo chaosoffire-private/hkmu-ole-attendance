@@ -1,5 +1,10 @@
 # Full Refactor of hkmu-ole-attendance — Design
 
+> **Historical.** This describes the earlier **Python** implementation
+> (`main.py`, Selenium/`selenium-wire`) and is kept for reference only. The
+> project has since been rewritten in Rust; see [`README.md`](../../../README.md)
+> for the current architecture.
+
 **Date:** 2026-08-29
 **Status:** Approved
 

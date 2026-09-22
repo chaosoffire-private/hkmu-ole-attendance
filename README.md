@@ -5,6 +5,11 @@ Online Learning Environment (OLE).
 
 > Rewritten in Rust: pure HTTPS, no browser, no WebDriver.
 
+Forked from [avanavan/hkmu-ole-attendance](https://github.com/avanavan/hkmu-ole-attendance),
+which was written in Python and drove a headless Firefox through Selenium. This
+is a from-scratch Rust rewrite: none of the Python remains, and the browser,
+geckodriver and Xvfb dependencies are gone.
+
 This will NOT work for lectures or tutorials that are using iBC's iAttend, as it
 requires a Bluetooth signal which this program cannot produce. For courses that
 use the teacher's **class activities** attendance, this works.

@@ -6,7 +6,7 @@ rust-version = "1.85"
 description = "Automatic class-activity attendance for HKMU's Online Learning Environment (OLE)"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/avanavan/hkmu-ole-attendance"
+repository = "https://github.com/chaosoffire-private/hkmu-ole-attendance"
 keywords = ["hkmu", "ole", "attendance", "automation"]
 categories = ["command-line-utilities"]
 
