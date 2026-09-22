@@ -12,13 +12,18 @@ use crate::port::{Notice, Notifier, PortError};
 pub struct LogNotifier;
 
 impl Notifier for LogNotifier {
-    async fn notify(&self, level: Notice, message: &str) -> Result<(), PortError> {
+    /// No await is needed: logging is synchronous, so the future is ready at once.
+    fn notify(
+        &self,
+        level: Notice,
+        message: &str,
+    ) -> impl std::future::Future<Output = Result<(), PortError>> + Send {
         match level {
             Notice::Info => info!("{message}"),
             Notice::Warning => warn!("{message}"),
             Notice::Error => error!("{message}"),
         }
-        Ok(())
+        std::future::ready(Ok(()))
     }
 }
 

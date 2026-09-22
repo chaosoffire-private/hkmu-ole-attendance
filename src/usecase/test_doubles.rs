@@ -89,12 +89,16 @@ impl RecordingNotifier {
 }
 
 impl Notifier for RecordingNotifier {
-    async fn notify(&self, level: Notice, message: &str) -> Result<(), PortError> {
+    fn notify(
+        &self,
+        level: Notice,
+        message: &str,
+    ) -> impl std::future::Future<Output = Result<(), PortError>> + Send {
         self.notices
             .lock()
             .expect("notifier lock")
             .push((level, message.to_owned()));
-        Ok(())
+        std::future::ready(Ok(()))
     }
 }
 
@@ -139,11 +143,11 @@ impl ScriptedGateway {
 }
 
 impl AttendanceGateway for ScriptedGateway {
-    async fn submit(
+    fn submit(
         &self,
         _class: &ScheduledClass,
         _coordinates: Option<(f64, f64)>,
-    ) -> Result<Submission, PortError> {
+    ) -> impl std::future::Future<Output = Result<Submission, PortError>> + Send {
         *self.submissions.lock().expect("gateway lock") += 1;
         if let Some((clock, seconds)) = &self.clock {
             clock.advance_secs(*seconds);
@@ -155,10 +159,10 @@ impl AttendanceGateway for ScriptedGateway {
             clippy::option_if_let_else,
             reason = "the match is clearer and infers without annotations"
         )]
-        match guard.pop_front() {
+        std::future::ready(match guard.pop_front() {
             Some(outcome) => outcome,
             None => Err(exhausted()),
-        }
+        })
     }
 }
 
@@ -176,12 +180,13 @@ impl FakeSession {
 }
 
 impl SessionProvider for FakeSession {
-    async fn session(&self) -> Result<CookieHeader, PortError> {
-        Ok(CookieHeader::new("fake"))
+    fn session(&self) -> impl std::future::Future<Output = Result<CookieHeader, PortError>> + Send {
+        std::future::ready(Ok(CookieHeader::new("fake")))
     }
 
-    async fn invalidate(&self) {
+    fn invalidate(&self) -> impl std::future::Future<Output = ()> + Send {
         *self.invalidations.lock().expect("session lock") += 1;
+        std::future::ready(())
     }
 }
 
@@ -204,8 +209,10 @@ impl FixedScheduleGateway {
 }
 
 impl ScheduleGateway for FixedScheduleGateway {
-    async fn today_classes(&self) -> Result<TodayClassResponse, PortError> {
-        Ok(self.payload.clone())
+    fn today_classes(
+        &self,
+    ) -> impl std::future::Future<Output = Result<TodayClassResponse, PortError>> + Send {
+        std::future::ready(Ok(self.payload.clone()))
     }
 }
 
