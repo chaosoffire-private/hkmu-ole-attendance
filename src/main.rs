@@ -5,13 +5,12 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use clap::Parser;
 use hkmu_ole_attendance::adapter::{
-    CachingSessionProvider, DiscordNotifier, OleAttendanceGateway, OleScheduleGateway, SystemClock,
+    CacheSessionInvalidator, DiscordNotifier, OleAttendanceGateway, OleScheduleGateway, SystemClock,
 };
 use hkmu_ole_attendance::config::Config;
-use hkmu_ole_attendance::domain::attendance::Submission;
+use hkmu_ole_attendance::infra::SessionCache;
 use hkmu_ole_attendance::port::{AttendanceGateway, Notice, Notifier};
 use hkmu_ole_attendance::scheduler::App;
-use hkmu_ole_attendance::session_cache::SessionCache;
 use hkmu_ole_attendance::usecase::daily_setup;
 use tracing_subscriber::EnvFilter;
 
@@ -30,11 +29,13 @@ struct Cli {
     #[arg(long)]
     notify_only: bool,
 
-    /// Authenticate, locate today's activity, submit, and report the outcome.
+    /// Report whether each class's attendance activity is reachable, without
+    /// submitting anything.
     #[arg(long)]
     probe: bool,
 
-    /// Coordinates submitted with attendance, as "lat,lng" (default: 0,0).
+    /// Coordinates submitted with attendance in the scheduled run, as
+    /// "lat,lng" (default: 0,0).
     #[arg(long, value_name = "LAT,LNG")]
     coordinates: Option<String>,
 }
@@ -57,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
     let coordinates = parse_coordinates(cli.coordinates.as_deref())?;
 
     if cli.probe {
-        return run_probe(&config, coordinates).await;
+        return run_probe(&config).await;
     }
 
     if cli.fetch_only || cli.notify_only {
@@ -74,7 +75,7 @@ async fn run_once(config: &Config, notify: bool) -> anyhow::Result<()> {
     let clock = SystemClock;
     let cache = SessionCache::new(config.clone());
     let gateway = OleScheduleGateway::new(cache.clone(), config.oleconnect_api_url.clone());
-    let session = CachingSessionProvider::new(cache);
+    let session = CacheSessionInvalidator::new(cache);
 
     // Without --notify-only every notice stays in the log; with it, the same
     // call also reaches Discord. One path, one flag.
@@ -93,13 +94,16 @@ async fn run_once(config: &Config, notify: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Submit attendance once for each of today's classes and report the outcome.
-async fn run_probe(config: &Config, coordinates: Option<(f64, f64)>) -> anyhow::Result<()> {
+/// Report whether each of today's classes has a reachable attendance activity.
+///
+/// Read-only: it locates the activity but never records attendance, so it is
+/// safe to run at any time.
+async fn run_probe(config: &Config) -> anyhow::Result<()> {
     let clock = SystemClock;
     let cache = SessionCache::new(config.clone());
     let schedule_gateway =
         OleScheduleGateway::new(cache.clone(), config.oleconnect_api_url.clone());
-    let session = CachingSessionProvider::new(cache.clone());
+    let session = CacheSessionInvalidator::new(cache.clone());
     let notifier = hkmu_ole_attendance::adapter::LogNotifier;
 
     // Reuse the daily setup flow so the timetables come from one code path.
@@ -127,31 +131,41 @@ async fn run_probe(config: &Config, coordinates: Option<(f64, f64)>) -> anyhow::
     );
 
     for class in &schedule.classes {
-        match gateway
-            .submit(class, coordinates)
-            .await
-            .map_err(|error| anyhow::anyhow!(error))
-        {
-            Ok(Submission::Confirmed) => {
+        match gateway.probe(class).await {
+            Ok(report) if report.found && report.open => {
                 notifier
-                    .notify(Notice::Info, &format!("{} | confirmed", class.course_code))
-                    .await
-                    .ok();
+                    .notify(
+                        Notice::Info,
+                        &format!("{} | attendance activity is open", class.course_code),
+                    )
+                    .await;
             }
-            Ok(other) => {
+            Ok(report) if report.found => {
                 notifier
-                    .notify(Notice::Info, &format!("{} | {other}", class.course_code))
-                    .await
-                    .ok();
+                    .notify(
+                        Notice::Warning,
+                        &format!(
+                            "{} | attendance activity found but its window is closed",
+                            class.course_code
+                        ),
+                    )
+                    .await;
+            }
+            Ok(_) => {
+                notifier
+                    .notify(
+                        Notice::Warning,
+                        &format!("{} | no attendance activity found", class.course_code),
+                    )
+                    .await;
             }
             Err(error) => {
                 notifier
                     .notify(
                         Notice::Error,
-                        &format!("{} | failed: {error}", class.course_code),
+                        &format!("{} | probe failed: {error}", class.course_code),
                     )
-                    .await
-                    .ok();
+                    .await;
             }
         }
     }

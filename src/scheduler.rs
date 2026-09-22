@@ -4,20 +4,19 @@
 //! dependency arrow points inward — the use cases never see an adapter.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 use tracing::{error, info, instrument, warn};
 
 use crate::adapter::{
-    CachingSessionProvider, DiscordNotifier, OleAttendanceGateway, OleScheduleGateway, SystemClock,
+    CacheSessionInvalidator, DiscordNotifier, OleAttendanceGateway, OleScheduleGateway, SystemClock,
 };
 use crate::config::Config;
 use crate::domain::schedule::ScheduledClass;
 use crate::domain::time::duration_until_next;
+use crate::infra::session_cache::SessionCache;
 use crate::port::{Clock, Notice, Notifier, Result as PortResult};
-use crate::session_cache::SessionCache;
 use crate::usecase::{AttendanceOutcome, PollParts, SetupOutcome, daily_setup, mark_attendance};
 
 /// Orchestrates the daily setup and the per-class attendance tasks.
@@ -65,7 +64,7 @@ impl App {
         let clock = SystemClock;
         let gateway =
             OleScheduleGateway::new(self.cache.clone(), self.config.oleconnect_api_url.clone());
-        let session = CachingSessionProvider::new(self.cache.clone());
+        let session = CacheSessionInvalidator::new(self.cache.clone());
 
         let outcome = daily_setup(
             &clock,
@@ -98,7 +97,7 @@ impl App {
                     config.oleconnect_api_url.clone(),
                     config.ole_url.clone(),
                 );
-                let session = CachingSessionProvider::new(cache);
+                let session = CacheSessionInvalidator::new(cache);
 
                 mark_attendance(
                     PollParts {
@@ -156,8 +155,7 @@ impl App {
 
             if let Err(error) = Arc::clone(&self).daily_setup().await {
                 error!(%error, "daily setup failed");
-                let _ = self
-                    .notifier
+                self.notifier
                     .notify(
                         Notice::Error,
                         &format!("**Daily Setup Error**\nError: {error}"),
@@ -167,6 +165,3 @@ impl App {
         }
     }
 }
-
-/// The delay between timetable retrieval attempts.
-pub const FETCH_RETRY_DELAY: Duration = Duration::from_secs(30);

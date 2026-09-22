@@ -2,28 +2,16 @@
 
 use tracing::{error, info, warn};
 
-use crate::port::{Notice, Notifier, PortError};
+use crate::port::{Notice, Notifier};
 
 /// Writes every notice to the log.
-///
-/// Always successful: logging is the fallback transport and must never be the
-/// reason a caller fails.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LogNotifier;
 
 impl Notifier for LogNotifier {
-    /// No await is needed: logging is synchronous, so the future is ready at once.
-    fn notify(
-        &self,
-        level: Notice,
-        message: &str,
-    ) -> impl std::future::Future<Output = Result<(), PortError>> + Send {
-        match level {
-            Notice::Info => info!("{message}"),
-            Notice::Warning => warn!("{message}"),
-            Notice::Error => error!("{message}"),
-        }
-        std::future::ready(Ok(()))
+    fn notify(&self, level: Notice, message: &str) -> impl std::future::Future<Output = ()> + Send {
+        log_notice(level, message);
+        std::future::ready(())
     }
 }
 
@@ -46,72 +34,44 @@ impl DiscordNotifier {
 }
 
 impl Notifier for DiscordNotifier {
-    /// Always logged; posted when a webhook is configured.
-    ///
-    /// A delivery failure is logged and swallowed. Callers report *before*
-    /// scheduling attendance, so propagating here would let a notification
-    /// outage suppress attendance entirely.
-    async fn notify(&self, level: Notice, message: &str) -> Result<(), PortError> {
-        match level {
-            Notice::Info => info!("{message}"),
-            Notice::Warning => warn!("{message}"),
-            Notice::Error => error!("{message}"),
-        }
+    async fn notify(&self, level: Notice, message: &str) {
+        log_notice(level, message);
 
         let Some(webhook) = self.webhook.as_deref() else {
-            warn!(target: "notify", "{message}");
-            return Ok(());
+            return;
         };
-
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .https_only(true)
-            .build()
-            .map_err(|error| PortError::Transport(error.to_string()))?;
-
-        let response = client
-            .post(webhook)
-            .json(&serde_json::json!({ "content": message }))
-            .send()
-            .await
-            .map_err(|error| PortError::Transport(error.to_string()))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            error!(%status, body = %body, "Discord webhook rejected the message");
-            return Ok(());
-        }
-        Ok(())
-    }
-}
-
-/// Delivers to a primary notifier, tolerating its failure.
-#[derive(Debug)]
-pub struct CompositeNotifier<P, F> {
-    primary: P,
-    fallback: F,
-}
-
-impl<P, F> CompositeNotifier<P, F> {
-    /// Pair a primary notifier with a fallback used when it fails.
-    pub const fn new(primary: P, fallback: F) -> Self {
-        Self { primary, fallback }
-    }
-}
-
-impl<P, F> Notifier for CompositeNotifier<P, F>
-where
-    P: Notifier,
-    F: Notifier,
-{
-    async fn notify(&self, level: Notice, message: &str) -> Result<(), PortError> {
-        match self.primary.notify(level, message).await {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                warn!(%error, "primary notifier failed; using the fallback");
-                self.fallback.notify(level, message).await
-            }
+        if let Err(error) = post_to_webhook(webhook, message).await {
+            error!(%error, "Discord delivery failed; the notice was logged above");
         }
     }
+}
+
+fn log_notice(level: Notice, message: &str) {
+    match level {
+        Notice::Info => info!("{message}"),
+        Notice::Warning => warn!("{message}"),
+        Notice::Error => error!("{message}"),
+    }
+}
+
+async fn post_to_webhook(webhook: &str, message: &str) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .https_only(true)
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    let response = client
+        .post(webhook)
+        .json(&serde_json::json!({ "content": message }))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let body = response.text().await.unwrap_or_default();
+    Err(format!("webhook returned {status}: {body}"))
 }

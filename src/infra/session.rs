@@ -7,7 +7,7 @@ use serde::de::DeserializeOwned;
 use tracing::{debug, warn};
 use url::Url;
 
-use crate::cookie::CookieStore;
+use super::cookie::CookieStore;
 use crate::error::{AppError, Result};
 
 /// A browser-like User-Agent; the OLE front ends reject some default clients.
@@ -18,12 +18,12 @@ const TIMEOUT_SECS: u64 = 30;
 
 /// Stateful HTTP session sharing one cookie jar.
 #[derive(Debug, Clone)]
-pub struct Session {
+pub struct HttpSession {
     client: Client,
     cookies: CookieStore,
 }
 
-impl Session {
+impl HttpSession {
     /// Build a session with an empty jar.
     ///
     /// # Errors
@@ -77,15 +77,15 @@ impl Session {
     /// Perform a GET with the XHR marker the `oledb` API requires.
     ///
     /// # Errors
-    /// As [`Session::get`].
-    pub async fn get_xhr(&mut self, url: &str) -> Result<String> {
+    /// As [`HttpSession::get`].
+    async fn get_xhr(&mut self, url: &str) -> Result<String> {
         self.send_following(Method::GET, url, None, true).await
     }
 
     /// Perform a form POST, following redirects.
     ///
     /// # Errors
-    /// As [`Session::get`].
+    /// As [`HttpSession::get`].
     pub async fn post_form(&mut self, url: &str, form: &[(&str, &str)]) -> Result<String> {
         self.send_following(Method::POST, url, Some(form.to_vec()), false)
             .await
@@ -94,7 +94,7 @@ impl Session {
     /// GET a URL and decode the body as JSON.
     ///
     /// # Errors
-    /// As [`Session::get`], plus [`AppError::Json`] when the body is not JSON.
+    /// As [`HttpSession::get`], plus [`AppError::Json`] when the body is not JSON.
     pub async fn get_json<T: DeserializeOwned>(&mut self, url: &str) -> Result<T> {
         let body = self.get_xhr(url).await?;
         serde_json::from_str(&body).map_err(AppError::Json)
@@ -164,13 +164,13 @@ fn redirect_target(base: &Url, response: &Response) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::Session;
-    use crate::cookie::Cookie;
+    use super::HttpSession;
+    use crate::infra::cookie::Cookie;
 
     #[tokio::test]
     async fn cookies_are_scoped_to_the_university_domain() {
         // Given a session seeded with a university session cookie.
-        let mut session = Session::new().expect("client builds");
+        let mut session = HttpSession::new().expect("client builds");
         session.cookies_mut().upsert(Cookie {
             name: "LtpaToken".to_owned(),
             value: "secret".to_owned(),

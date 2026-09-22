@@ -15,7 +15,7 @@ use crate::domain::attendance::{
 };
 use crate::domain::schedule::ScheduledClass;
 use crate::domain::time::minutes_until;
-use crate::port::{AttendanceGateway, Clock, Notice, Notifier, SessionProvider};
+use crate::port::{AttendanceGateway, Clock, Notice, Notifier, SessionInvalidator};
 
 /// How one class finished.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +55,7 @@ where
     C: Clock,
     G: AttendanceGateway,
     N: Notifier,
-    S: SessionProvider,
+    S: SessionInvalidator,
 {
     let PollParts {
         clock,
@@ -119,7 +119,7 @@ where
     C: Clock,
     G: AttendanceGateway,
     N: Notifier,
-    S: SessionProvider,
+    S: SessionInvalidator,
 {
     let mut attempt = 0_u32;
     let mut warning_sent = false;
@@ -133,8 +133,7 @@ where
                 .now(poll.zone)
                 .strftime("%Y-%m-%d %H:%M:%S %Z")
                 .to_string();
-            let _ = poll
-                .notifier
+            poll.notifier
                 .notify(Notice::Info, &confirmed_message(poll.class, &at))
                 .await;
             info!("attendance confirmed");
@@ -152,8 +151,7 @@ where
         tokio::time::sleep(poll.interval).await;
     }
 
-    let _ = poll
-        .notifier
+    poll.notifier
         .notify(Notice::Error, &failed_message(poll.class, attempt))
         .await;
     AttendanceOutcome::Unconfirmed { attempts: attempt }
@@ -165,7 +163,7 @@ where
     C: Clock,
     G: AttendanceGateway,
     N: Notifier,
-    S: SessionProvider,
+    S: SessionInvalidator,
 {
     match poll.gateway.submit(poll.class, poll.coordinates).await {
         Ok(outcome) => outcome,
@@ -191,7 +189,7 @@ where
     C: Clock,
     G: AttendanceGateway,
     N: Notifier,
-    S: SessionProvider,
+    S: SessionInvalidator,
 {
     let now = poll.clock.now(poll.zone);
     if !should_warn(&poll.window, &now, poll.warning_threshold, warning_sent) {
@@ -199,8 +197,7 @@ where
     }
     let end = poll.window.ends_at.to_zoned(now.time_zone().clone());
     let remaining = minutes_until(&end, &now);
-    let _ = poll
-        .notifier
+    poll.notifier
         .notify(
             Notice::Warning,
             &warning_message(poll.class, remaining, attempt, false),
@@ -240,7 +237,7 @@ mod tests {
     use super::{AttendanceOutcome, PollParts, mark_attendance};
     use crate::domain::attendance::Submission;
     use crate::port::Notice;
-    use crate::port::error::PortError;
+    use crate::port::error::{PortError, SessionFailure};
     use crate::usecase::test_doubles::{
         FakeClock, FakeSession, RecordingNotifier, ScriptedGateway, class_from, hkt,
     };
@@ -393,7 +390,9 @@ mod tests {
         // and a second call that succeeds.
         let clock = FakeClock::at(hkt("2026-09-21T11:00:00+08:00"));
         let gateway = ScriptedGateway::new(vec![
-            Err(PortError::Session("revoked server-side".to_owned())),
+            Err(PortError::Session(SessionFailure::Expired(
+                "revoked server-side".to_owned(),
+            ))),
             Ok(Submission::Confirmed),
         ]);
         let notifier = RecordingNotifier::default();

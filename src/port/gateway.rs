@@ -1,4 +1,4 @@
-//! The gateway ports: reading the timetable, and driving one attendance attempt.
+//! The gateway ports: reading the timetable, and driving attendance.
 
 use super::error::PortError;
 use crate::domain::attendance::Submission;
@@ -12,11 +12,21 @@ pub trait ScheduleGateway: Send + Sync {
     ) -> impl std::future::Future<Output = Result<TodayClassResponse, PortError>> + Send;
 }
 
-/// Drives one attendance interaction for a class.
+/// Drives attendance for a class: locating the activity, then optionally
+/// recording it.
 ///
-/// A call authenticates (reusing a cached session when possible), locates the
-/// class's activity, and submits.
+/// A call authenticates first, reusing a cached session when possible.
 pub trait AttendanceGateway: Send + Sync {
+    /// Report whether `class` has a reachable attendance activity.
+    ///
+    /// Read-only by contract: implementations must not submit attendance.
+    /// Returning [`PortError::Session`] tells the caller the cached session was
+    /// rejected, so it should be discarded and re-established.
+    fn probe(
+        &self,
+        class: &ScheduledClass,
+    ) -> impl std::future::Future<Output = Result<ActivityReport, PortError>> + Send;
+
     /// Attempt attendance once for `class`.
     ///
     /// Returning [`PortError::Session`] tells the caller the cached session was
@@ -26,4 +36,13 @@ pub trait AttendanceGateway: Send + Sync {
         class: &ScheduledClass,
         coordinates: Option<(f64, f64)>,
     ) -> impl std::future::Future<Output = Result<Submission, PortError>> + Send;
+}
+
+/// What a read-only probe found on a class's activities page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityReport {
+    /// Whether an attendance-type activity exists at all.
+    pub found: bool,
+    /// Whether the located activity reports an open window.
+    pub open: bool,
 }

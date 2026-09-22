@@ -22,8 +22,10 @@ use jiff::{Timestamp, Zoned};
 use crate::domain::attendance::Submission;
 use crate::domain::schedule::{ScheduledClass, TodayClassResponse};
 use crate::port::error::PortError;
-use crate::port::session::CookieHeader;
-use crate::port::{AttendanceGateway, Clock, Notice, Notifier, ScheduleGateway, SessionProvider};
+use crate::port::gateway::ActivityReport;
+use crate::port::{
+    AttendanceGateway, Clock, Notice, Notifier, ScheduleGateway, SessionInvalidator,
+};
 
 /// A clock the test drives by hand.
 #[derive(Debug)]
@@ -89,16 +91,12 @@ impl RecordingNotifier {
 }
 
 impl Notifier for RecordingNotifier {
-    fn notify(
-        &self,
-        level: Notice,
-        message: &str,
-    ) -> impl std::future::Future<Output = Result<(), PortError>> + Send {
+    fn notify(&self, level: Notice, message: &str) -> impl std::future::Future<Output = ()> + Send {
         self.notices
             .lock()
             .expect("notifier lock")
             .push((level, message.to_owned()));
-        std::future::ready(Ok(()))
+        std::future::ready(())
     }
 }
 
@@ -143,6 +141,17 @@ impl ScriptedGateway {
 }
 
 impl AttendanceGateway for ScriptedGateway {
+    fn probe(
+        &self,
+        _class: &ScheduledClass,
+    ) -> impl std::future::Future<Output = Result<ActivityReport, PortError>> + Send {
+        *self.submissions.lock().expect("gateway lock") += 1;
+        std::future::ready(Ok(ActivityReport {
+            found: true,
+            open: true,
+        }))
+    }
+
     fn submit(
         &self,
         _class: &ScheduledClass,
@@ -166,7 +175,7 @@ impl AttendanceGateway for ScriptedGateway {
     }
 }
 
-/// A session provider that only counts invalidations.
+/// A session invalidator that only counts invalidations.
 #[derive(Debug, Default)]
 pub struct FakeSession {
     invalidations: Mutex<u32>,
@@ -179,11 +188,7 @@ impl FakeSession {
     }
 }
 
-impl SessionProvider for FakeSession {
-    fn session(&self) -> impl std::future::Future<Output = Result<CookieHeader, PortError>> + Send {
-        std::future::ready(Ok(CookieHeader::new("fake")))
-    }
-
+impl SessionInvalidator for FakeSession {
     fn invalidate(&self) -> impl std::future::Future<Output = ()> + Send {
         *self.invalidations.lock().expect("session lock") += 1;
         std::future::ready(())
@@ -213,6 +218,63 @@ impl ScheduleGateway for FixedScheduleGateway {
         &self,
     ) -> impl std::future::Future<Output = Result<TodayClassResponse, PortError>> + Send {
         std::future::ready(Ok(self.payload.clone()))
+    }
+}
+
+/// A schedule gateway that replays a scripted sequence of results.
+#[derive(Debug)]
+pub struct ScriptedScheduleGateway {
+    results: Mutex<VecDeque<Result<TodayClassResponse, PortError>>>,
+    calls: Mutex<u32>,
+}
+
+impl ScriptedScheduleGateway {
+    /// Serve each result in turn.
+    pub fn new(results: Vec<Result<TodayClassResponse, PortError>>) -> Self {
+        Self {
+            results: Mutex::new(results.into()),
+            calls: Mutex::new(0),
+        }
+    }
+
+    /// How many times the gateway was asked for the timetable.
+    pub fn call_count(&self) -> u32 {
+        *self.calls.lock().expect("gateway lock")
+    }
+}
+
+impl ScheduleGateway for ScriptedScheduleGateway {
+    fn today_classes(
+        &self,
+    ) -> impl std::future::Future<Output = Result<TodayClassResponse, PortError>> + Send {
+        *self.calls.lock().expect("gateway lock") += 1;
+        let next = self
+            .results
+            .lock()
+            .expect("gateway lock")
+            .pop_front()
+            .unwrap_or_else(|| Err(PortError::Remote("script exhausted".to_owned())));
+        std::future::ready(next)
+    }
+}
+
+/// A payload carrying the success result and no courses.
+pub fn successful_payload() -> TodayClassResponse {
+    TodayClassResponse {
+        result: crate::domain::schedule::ApiResult::Number(1),
+        classes: Vec::new(),
+        error: None,
+        errormsg: None,
+    }
+}
+
+/// A payload carrying the API's rejection, as an unusable session produces.
+pub fn rejected_payload() -> TodayClassResponse {
+    TodayClassResponse {
+        result: crate::domain::schedule::ApiResult::Text("-1".to_owned()),
+        classes: Vec::new(),
+        error: Some("9901".to_owned()),
+        errormsg: Some("The API is only for web users.".to_owned()),
     }
 }
 

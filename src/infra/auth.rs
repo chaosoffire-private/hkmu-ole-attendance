@@ -2,11 +2,11 @@
 
 use tracing::{debug, info, warn};
 
+use super::cookie::Cookie;
+use super::html;
+use super::session::HttpSession;
 use crate::config::{Config, Credentials};
-use crate::cookie::Cookie;
 use crate::error::{AppError, Result};
-use crate::html;
-use crate::session::Session;
 
 /// Cookie domain covering every host this client talks to.
 const UNIVERSITY_DOMAIN: &str = ".hkmu.edu.hk";
@@ -17,7 +17,7 @@ const NAM_USER_FIELD: &str = "Ecom_User_ID";
 /// The password field the NAM credential form names.
 const NAM_PASSWORD_FIELD: &str = "Ecom_Password";
 
-/// Establishes an authenticated [`Session`] from the configured credentials.
+/// Establishes an authenticated [`HttpSession`] from the configured credentials.
 #[derive(Debug)]
 pub struct Authenticator {
     config: Config,
@@ -37,7 +37,7 @@ impl Authenticator {
     /// # Errors
     /// Returns [`AppError::SessionRejected`] when a supplied cookie is not
     /// accepted, or [`AppError::Auth`] when the login chain fails.
-    pub async fn authenticate(&self) -> Result<Session> {
+    pub async fn authenticate(&self) -> Result<HttpSession> {
         match &self.config.credentials {
             Credentials::SessionCookie(secret) => {
                 info!(mode = "session-cookie", "authenticating");
@@ -54,8 +54,8 @@ impl Authenticator {
     }
 
     /// Seed a session from a raw `Cookie:` header value and validate it.
-    async fn seed_session_cookie(&self, raw: &str) -> Result<Session> {
-        let mut session = Session::new()?;
+    async fn seed_session_cookie(&self, raw: &str) -> Result<HttpSession> {
+        let mut session = HttpSession::new()?;
         let mut count = 0_usize;
 
         for entry in raw.split(';') {
@@ -93,8 +93,8 @@ impl Authenticator {
     }
 
     /// Drive the full NAM -> Domino SSO chain with a username and password.
-    async fn via_sso(&self, student_id: &str, password: &str) -> Result<Session> {
-        let mut session = Session::new()?;
+    async fn via_sso(&self, student_id: &str, password: &str) -> Result<HttpSession> {
+        let mut session = HttpSession::new()?;
 
         let landing = session.get(&self.config.ole_url).await?;
         debug!(bytes = landing.len(), "fetched login landing page");
@@ -174,8 +174,8 @@ impl Authenticator {
     }
 
     /// Confirm the session can call the class API.
-    async fn validate(&self, session: &mut Session) -> Result<bool> {
-        let payload: crate::models::TodayClassResponse =
+    async fn validate(&self, session: &mut HttpSession) -> Result<bool> {
+        let payload: crate::domain::schedule::TodayClassResponse =
             session.get_json(&self.config.oleconnect_api_url).await?;
         if payload.is_success() {
             return Ok(true);
@@ -195,7 +195,7 @@ fn absolute(base: &str, reference: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{UNIVERSITY_DOMAIN, absolute};
-    use crate::cookie::Cookie;
+    use crate::infra::cookie::Cookie;
 
     #[test]
     fn resolves_relative_form_actions_against_the_portal() {

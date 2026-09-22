@@ -20,11 +20,4 @@ pub enum DomainError {
         /// The rejected input.
         raw: String,
     },
-
-    /// A URL could not be formed from domain values.
-    #[error("invalid url {raw:?}")]
-    Url {
-        /// The rejected input.
-        raw: String,
-    },
 }

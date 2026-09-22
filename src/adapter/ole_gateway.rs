@@ -7,35 +7,19 @@ use tracing::{debug, warn};
 
 use crate::domain::attendance::Submission;
 use crate::domain::schedule::{ScheduledClass, TodayClassResponse};
-use crate::error::AppError;
-use crate::models::ClassInfo;
-use crate::oleconnect::OleClient;
+use crate::infra::oleconnect::{Activity, OleClient};
+use crate::infra::session_cache::SessionCache;
 use crate::port::error::PortError;
-use crate::port::session::CookieHeader;
-use crate::port::{AttendanceGateway, ScheduleGateway, SessionProvider};
-use crate::session_cache::SessionCache;
+use crate::port::gateway::ActivityReport;
+use crate::port::{AttendanceGateway, ScheduleGateway, SessionInvalidator};
 
-/// Build the class-activities URL for a course.
+/// The class-activities page for a course.
 fn activities_url(ole_url: &str, class: &ScheduledClass) -> String {
     let base = ole_url.trim_end_matches('/');
     format!(
         "{base}/course{}/{}.nsf//class_activities_student?readform&",
         class.termcode, class.course_code
     )
-}
-
-/// Translate a domain class into the shape the HTTP client consumes.
-fn to_client_class(ole_url: &str, class: &ScheduledClass) -> ClassInfo {
-    ClassInfo {
-        termcode: class.termcode.clone(),
-        course_code: class.course_code.clone(),
-        class_name: class.name.clone(),
-        starts_at: class.starts_at,
-        ends_at: class.ends_at,
-        group: class.group.clone(),
-        venue: class.venue.clone(),
-        activities_url: activities_url(ole_url, class),
-    }
 }
 
 /// Reads the timetable over HTTPS.
@@ -54,16 +38,9 @@ impl OleScheduleGateway {
 
 impl ScheduleGateway for OleScheduleGateway {
     async fn today_classes(&self) -> Result<TodayClassResponse, PortError> {
-        let session = self
-            .cache
-            .session()
-            .await
-            .map_err(|error| PortError::Session(error.to_string()))?;
+        let session = self.cache.session().await?;
         let mut client = OleClient::new(session, self.api_url.clone());
-        let payload = client
-            .fetch_today_classes()
-            .await
-            .map_err(|error| PortError::Remote(error.to_string()))?;
+        let payload = client.fetch_today_classes().await?;
 
         // The port speaks the domain type; the wire type is an adapter concern.
         Ok(payload)
@@ -90,34 +67,21 @@ impl OleAttendanceGateway {
 }
 
 impl AttendanceGateway for OleAttendanceGateway {
+    async fn probe(&self, class: &ScheduledClass) -> Result<ActivityReport, PortError> {
+        let activity = self.locate(class).await?;
+        Ok(ActivityReport {
+            found: activity.is_attendance(),
+            open: activity.open,
+        })
+    }
+
     async fn submit(
         &self,
         class: &ScheduledClass,
         coordinates: Option<(f64, f64)>,
     ) -> Result<Submission, PortError> {
-        let session = self
-            .cache
-            .session()
-            .await
-            .map_err(|error| PortError::Session(error.to_string()))?;
-        let mut client = OleClient::new(session, self.api_url.clone());
-        let client_class = to_client_class(&self.ole_url, class);
-
-        let activity =
-            client
-                .discover_activity(&client_class)
-                .await
-                .map_err(|error| match error {
-                    // A revoked session is recoverable: surface it as such so the
-                    // use case discards the cache and logs in again.
-                    AppError::SessionExpired(reason) => {
-                        warn!(%reason, "session was revoked server-side");
-                        PortError::Session(reason)
-                    }
-                    other => PortError::Unexpected(other.to_string()),
-                })?;
-
-        debug!(unid = %activity.unid, kind = %activity.attendance_type, "activity located");
+        let activity = self.locate(class).await?;
+        let activities = activities_url(&self.ole_url, class);
 
         if !activity.is_attendance() {
             return Err(PortError::Unexpected(format!(
@@ -126,38 +90,109 @@ impl AttendanceGateway for OleAttendanceGateway {
             )));
         }
 
+        let session = self.cache.session().await?;
+        let mut client = OleClient::new(session, self.api_url.clone());
         client
-            .submit_attendance(&client_class.activities_url, &activity.unid, coordinates)
+            .submit_attendance(&activities, &activity.unid, coordinates)
             .await
-            .map_err(|error| PortError::Remote(error.to_string()))
+            .map_err(PortError::from)
     }
 }
 
-/// Adapts the caching authenticator to the session port.
+impl OleAttendanceGateway {
+    async fn locate(&self, class: &ScheduledClass) -> Result<Activity, PortError> {
+        let session = self.cache.session().await?;
+        let mut client = OleClient::new(session, self.api_url.clone());
+        let activities = activities_url(&self.ole_url, class);
+
+        match client.discover_activity(class, &activities).await {
+            Ok(activity) => {
+                debug!(unid = %activity.unid, kind = %activity.attendance_type, "activity located");
+                Ok(activity)
+            }
+            Err(error) => {
+                let mapped = PortError::from(error);
+                // A revoked session is recoverable: the port reports it as a
+                // session failure so the use case discards the cache and logs in
+                // again rather than replaying a dead cookie.
+                if mapped.is_session_failure() {
+                    warn!(%mapped, "session was revoked server-side");
+                }
+                Err(mapped)
+            }
+        }
+    }
+}
+
+/// Exposes the cache's invalidation to the application without leaking the
+/// cache itself, so the use cases never name a transport type.
 #[derive(Debug)]
-pub struct CachingSessionProvider {
+pub struct CacheSessionInvalidator {
     cache: SessionCache,
 }
 
-impl CachingSessionProvider {
+impl CacheSessionInvalidator {
     /// Wrap an existing cache.
     pub const fn new(cache: SessionCache) -> Self {
         Self { cache }
     }
 }
 
-impl SessionProvider for CachingSessionProvider {
-    /// The cookie itself stays inside the cache; the application layer only
-    /// learns whether a session is available.
-    async fn session(&self) -> Result<CookieHeader, PortError> {
-        self.cache
-            .session()
-            .await
-            .map(|_| CookieHeader::new("cached"))
-            .map_err(|error| PortError::Session(error.to_string()))
-    }
-
+impl SessionInvalidator for CacheSessionInvalidator {
     async fn invalidate(&self) {
         self.cache.invalidate().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::activities_url;
+    use crate::domain::schedule::ScheduledClass;
+    use crate::port::gateway::ActivityReport;
+
+    fn class() -> ScheduledClass {
+        ScheduledClass {
+            termcode: "2604".to_owned(),
+            course_code: "ELEC3050SEF".to_owned(),
+            name: "Lecture ( Full Time )".to_owned(),
+            starts_at: jiff::civil::date(2026, 9, 21).at(11, 0, 0, 0),
+            ends_at: Some(jiff::civil::date(2026, 9, 21).at(12, 50, 0, 0)),
+            group: "L01".to_owned(),
+            venue: "HKMU C0G01".to_owned(),
+        }
+    }
+
+    #[test]
+    fn builds_the_class_activities_url_from_the_domain_class() {
+        // Given a scheduled class and the portal base.
+        // When the activities URL is built.
+        // Then it matches the path the site serves, without a duplicate builder.
+        assert_eq!(
+            activities_url("https://iole.hkmu.edu.hk/", &class()),
+            "https://iole.hkmu.edu.hk/course2604/ELEC3050SEF.nsf//class_activities_student?readform&"
+        );
+    }
+
+    #[test]
+    fn the_activity_report_distinguishes_found_from_open() {
+        // Given the three states a probe can observe.
+        let open = ActivityReport {
+            found: true,
+            open: true,
+        };
+        let closed = ActivityReport {
+            found: true,
+            open: false,
+        };
+        let absent = ActivityReport {
+            found: false,
+            open: false,
+        };
+
+        // When compared.
+        // Then each is distinct, so the operator can tell "no activity" from
+        // "activity exists but its window has closed".
+        assert_ne!(open, closed);
+        assert_ne!(closed, absent);
     }
 }

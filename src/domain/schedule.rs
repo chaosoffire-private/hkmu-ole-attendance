@@ -6,7 +6,6 @@
 use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 
-use super::error::DomainError;
 use super::time::parse_class_time;
 
 /// `result` in OLE payloads is sometimes a number and sometimes a string.
@@ -76,12 +75,12 @@ pub struct Course {
     pub course_code: String,
     /// Sessions belonging to this course.
     #[serde(default)]
-    pub classes: Vec<ClassSession>,
+    pub classes: Vec<WireClassSession>,
 }
 
 /// A single scheduled session, as the API describes it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClassSession {
+pub struct WireClassSession {
     /// Display name, e.g. `Lecture ( Full Time )`.
     #[serde(default)]
     pub name: String,
@@ -180,22 +179,6 @@ pub fn select_day(payload: &TodayClassResponse, day: Date) -> DaySchedule {
     }
 }
 
-/// The class-activities page for a course.
-///
-/// # Errors
-/// [`DomainError::Url`] is not returned today, but the signature stays fallible
-/// so a future move to real URL validation does not change call sites.
-pub fn activities_url(
-    ole_url: &str,
-    termcode: &str,
-    course_code: &str,
-) -> Result<String, DomainError> {
-    let base = ole_url.trim_end_matches('/');
-    Ok(format!(
-        "{base}/course{termcode}/{course_code}.nsf//class_activities_student?readform&"
-    ))
-}
-
 /// Build the "retrieved classes" notification text.
 pub fn format_classes_message(schedule: &DaySchedule, system_time: &str) -> String {
     if !schedule.result.is_success() {
@@ -238,7 +221,7 @@ pub fn format_classes_message(schedule: &DaySchedule, system_time: &str) -> Stri
 mod tests {
     use jiff::civil::date;
 
-    use super::{TodayClassResponse, activities_url, format_classes_message, select_day};
+    use super::{TodayClassResponse, format_classes_message, select_day};
 
     fn payload(json: &str) -> TodayClassResponse {
         serde_json::from_str(json).expect("test payload is valid")
@@ -338,20 +321,6 @@ mod tests {
         // Then they are ordered, so scheduling follows the day.
         let names: Vec<&str> = schedule.classes.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["Early", "Late"]);
-    }
-
-    #[test]
-    fn builds_the_activities_url() {
-        // Given the portal base and a course.
-        // When the URL is built.
-        let url =
-            activities_url("https://iole.hkmu.edu.hk", "2604", "ELEC3050SEF").expect("builds");
-
-        // Then it matches the path the site serves.
-        assert_eq!(
-            url,
-            "https://iole.hkmu.edu.hk/course2604/ELEC3050SEF.nsf//class_activities_student?readform&"
-        );
     }
 
     #[test]

@@ -5,23 +5,43 @@
 //! Instead the session is held in memory and reused for as long as its
 //! `LtpaToken` remains valid; only once it is near expiry does the client
 //! perform a fresh login.
+//!
+//! Every class's poll task shares one cache, so a cold cache could otherwise
+//! start one login per task at once. Refreshes are therefore serialised behind
+//! a gate, and a recent failure is not retried until a backoff has passed, so
+//! the SSO endpoint sees at most one login attempt per backoff window.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use crate::auth::Authenticator;
+use super::auth::Authenticator;
+use super::ltpa::parse_ltpa_expiry;
+use super::session::HttpSession;
 use crate::config::Config;
-use crate::error::Result;
-use crate::ltpa::parse_ltpa_expiry;
-use crate::session::Session;
+use crate::error::{AppError, Result};
 
 /// Re-login once the cached session has less than this left.
 ///
 /// A margin is needed because a poll may begin just before expiry and still be
 /// in flight when it lapses.
 pub const REFRESH_MARGIN_SECS: i64 = 5 * 60;
+
+/// How long a failed login suppresses the next attempt.
+pub const RETRY_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Produces a fresh session. A function pointer rather than a call so the
+/// refresh policy can be exercised without reaching the network.
+type LoginFn =
+    fn(Config) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<HttpSession>> + Send>>;
+
+fn sso_login(
+    config: Config,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<HttpSession>> + Send>> {
+    Box::pin(async move { Authenticator::new(config).authenticate().await })
+}
 
 /// Holds one authenticated session and refreshes it when it ages out.
 ///
@@ -30,7 +50,10 @@ pub const REFRESH_MARGIN_SECS: i64 = 5 * 60;
 #[derive(Debug, Clone)]
 pub struct SessionCache {
     config: Arc<Config>,
-    cached: Arc<Mutex<Option<Session>>>,
+    cached: Arc<Mutex<Option<HttpSession>>>,
+    refreshing: Arc<Mutex<()>>,
+    failed_at: Arc<Mutex<Option<Instant>>>,
+    login: LoginFn,
 }
 
 impl SessionCache {
@@ -39,6 +62,9 @@ impl SessionCache {
         Self {
             config: Arc::new(config),
             cached: Arc::new(Mutex::new(None)),
+            refreshing: Arc::new(Mutex::new(())),
+            failed_at: Arc::new(Mutex::new(None)),
+            login: sso_login,
         }
     }
 
@@ -46,51 +72,41 @@ impl SessionCache {
     ///
     /// # Errors
     /// Returns the underlying authentication error when a fresh login is
-    /// required and fails.
-    pub async fn session(&self) -> Result<Session> {
-        let now = jiff::Timestamp::now().as_second();
+    /// required and fails, or while a recent failure is still backing off.
+    pub async fn session(&self) -> Result<HttpSession> {
+        if let Some(ready) = self.reusable_session(now_secs()).await {
+            return Ok(ready);
+        }
 
-        // Inspect the cached session and release the lock before any await.
-        // Holding it across the login would serialise every concurrent poll
-        // behind one six-hop round trip.
-        let cached = {
-            let mut guard = self.cached.lock().await;
-            match guard.as_ref() {
-                Some(existing) => {
-                    let expiry = Self::expiry_of(existing);
-                    match expiry {
-                        Some(expiry)
-                            if !expiry.is_expired(now.saturating_add(REFRESH_MARGIN_SECS)) =>
-                        {
-                            debug!(
-                                remaining_secs = expiry.remaining_secs(now),
-                                "reusing cached session"
-                            );
-                            return Ok(existing.clone());
-                        }
-                        Some(expiry) => {
-                            info!(
-                                remaining_secs = expiry.remaining_secs(now),
-                                "cached session is at end of life; re-authenticating"
-                            );
-                            guard.take().is_some()
-                        }
-                        None => {
-                            debug!("cached session carries no readable expiry; reusing it");
-                            return Ok(existing.clone());
-                        }
-                    }
-                }
-                None => false,
+        // Inspect the cache and release the lock before any await. Holding it
+        // across the login would serialise every concurrent poll behind one
+        // six-hop round trip — and without a gate, each of them would start its
+        // own login the moment the slot looked cold.
+        let _refreshing = self.refreshing.lock().await;
+
+        // A caller that finished its login while we waited has warmed the slot.
+        if let Some(ready) = self.reusable_session(now_secs()).await {
+            return Ok(ready);
+        }
+
+        if let Some(remaining) = self.backoff_remaining().await {
+            return Err(AppError::Auth(format!(
+                "a login failed recently; retrying in {}s",
+                remaining.as_secs()
+            )));
+        }
+
+        match (self.login)((*self.config).clone()).await {
+            Ok(fresh) => {
+                *self.cached.lock().await = Some(fresh.clone());
+                *self.failed_at.lock().await = None;
+                Ok(fresh)
             }
-        };
-        debug!(discarded = cached, "cache slot cleared for refresh");
-
-        let fresh = Authenticator::new((*self.config).clone())
-            .authenticate()
-            .await?;
-        *self.cached.lock().await = Some(fresh.clone());
-        Ok(fresh)
+            Err(error) => {
+                *self.failed_at.lock().await = Some(Instant::now());
+                Err(error)
+            }
+        }
     }
 
     /// Drop the cached session so the next call must log in again.
@@ -103,8 +119,45 @@ impl SessionCache {
         }
     }
 
+    /// The cached session if it can still be used, clearing it when it cannot.
+    async fn reusable_session(&self, now: i64) -> Option<HttpSession> {
+        // Read and decide under the lock so clearing the slot cannot race a
+        // concurrent refresh, but do nothing else while holding it.
+        let mut guard = self.cached.lock().await;
+        let existing = (*guard).clone()?;
+
+        let Some(expiry) = Self::expiry_of(&existing) else {
+            debug!("cached session carries no readable expiry; reusing it");
+            return Some(existing);
+        };
+
+        if !expiry.is_expired(now.saturating_add(REFRESH_MARGIN_SECS)) {
+            debug!(
+                remaining_secs = expiry.remaining_secs(now),
+                "reusing cached session"
+            );
+            return Some(existing);
+        }
+
+        info!(
+            remaining_secs = expiry.remaining_secs(now),
+            "cached session is at end of life; re-authenticating"
+        );
+        guard.take();
+        None
+    }
+
+    /// How long a recent failure still suppresses the next login attempt.
+    async fn backoff_remaining(&self) -> Option<Duration> {
+        let failed_at = *self.failed_at.lock().await;
+        let elapsed = failed_at?.elapsed();
+        RETRY_BACKOFF
+            .checked_sub(elapsed)
+            .filter(|remaining| !remaining.is_zero())
+    }
+
     /// Read the expiry embedded in a session's `LtpaToken`, if present.
-    fn expiry_of(session: &Session) -> Option<crate::ltpa::TokenExpiry> {
+    fn expiry_of(session: &HttpSession) -> Option<super::ltpa::TokenExpiry> {
         let token = session.cookie_value("LtpaToken")?;
         let expiry = parse_ltpa_expiry(token);
         if expiry.is_none() {
@@ -112,15 +165,71 @@ impl SessionCache {
         }
         expiry
     }
+
+    #[cfg(test)]
+    fn with_login(config: Config, login: LoginFn) -> Self {
+        Self {
+            login,
+            ..Self::new(config)
+        }
+    }
+}
+
+/// The current Unix time in whole seconds.
+fn now_secs() -> i64 {
+    jiff::Timestamp::now().as_second()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::{REFRESH_MARGIN_SECS, SessionCache};
     use crate::config::{Config, Credentials};
     use crate::domain::time::TimeOfDay;
-    use crate::ltpa::TokenExpiry;
+    use crate::infra::ltpa::TokenExpiry;
     use crate::secret::Secret;
+
+    /// Counts calls to [`succeeding_login`], which only one test drives.
+    static SUCCEEDING_LOGINS: AtomicUsize = AtomicUsize::new(0);
+    /// Counts calls to [`failing_login`], which only one test drives.
+    static FAILING_LOGINS: AtomicUsize = AtomicUsize::new(0);
+
+    /// A login that always succeeds, so refresh policy can be tested offline.
+    ///
+    /// Yields once before returning, so concurrent callers genuinely overlap
+    /// and a missing single-flight would show up as extra attempts.
+    fn succeeding_login(
+        _config: Config,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = crate::error::Result<crate::infra::session::HttpSession>,
+                > + Send,
+        >,
+    > {
+        Box::pin(async {
+            SUCCEEDING_LOGINS.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            Ok(crate::infra::session::HttpSession::new().expect("client builds"))
+        })
+    }
+
+    /// A login that always fails, as a wrong password or a dead endpoint would.
+    fn failing_login(
+        _config: Config,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = crate::error::Result<crate::infra::session::HttpSession>,
+                > + Send,
+        >,
+    > {
+        Box::pin(async {
+            FAILING_LOGINS.fetch_add(1, Ordering::SeqCst);
+            Err(crate::error::AppError::Auth("login refused".to_owned()))
+        })
+    }
 
     fn config() -> Config {
         Config {
@@ -152,7 +261,8 @@ mod tests {
     async fn invalidate_clears_the_cached_session() {
         // Given a cache holding a session.
         let cache = SessionCache::new(config());
-        *cache.cached.lock().await = Some(crate::session::Session::new().expect("client builds"));
+        *cache.cached.lock().await =
+            Some(crate::infra::session::HttpSession::new().expect("client builds"));
 
         // When it is invalidated.
         cache.invalidate().await;
@@ -197,7 +307,7 @@ mod tests {
     ///
     /// The token is shaped like a real one, with the issue time in the past, so
     /// that a negative offset still produces a well-formed (but expired) token.
-    fn session_with_expiry(offset_from_now_secs: i64) -> crate::session::Session {
+    fn session_with_expiry(offset_from_now_secs: i64) -> crate::infra::session::HttpSession {
         use base64::Engine as _;
         use base64::engine::general_purpose::STANDARD;
 
@@ -215,8 +325,8 @@ mod tests {
         raw.extend_from_slice(b"CN=s1234567/OU=OUHKStudent/O=ouhk");
         let token = STANDARD.encode(raw);
 
-        let mut session = crate::session::Session::new().expect("client builds");
-        session.cookies_mut().upsert(crate::cookie::Cookie {
+        let mut session = crate::infra::session::HttpSession::new().expect("client builds");
+        session.cookies_mut().upsert(crate::infra::cookie::Cookie {
             name: "LtpaToken".to_owned(),
             value: token,
             domain: ".hkmu.edu.hk".to_owned(),
@@ -227,9 +337,9 @@ mod tests {
     }
 
     /// A session whose token cannot be parsed at all.
-    fn session_with_opaque_token() -> crate::session::Session {
-        let mut session = crate::session::Session::new().expect("client builds");
-        session.cookies_mut().upsert(crate::cookie::Cookie {
+    fn session_with_opaque_token() -> crate::infra::session::HttpSession {
+        let mut session = crate::infra::session::HttpSession::new().expect("client builds");
+        session.cookies_mut().upsert(crate::infra::cookie::Cookie {
             name: "LtpaToken".to_owned(),
             value: "not-a-real-token".to_owned(),
             domain: ".hkmu.edu.hk".to_owned(),
@@ -325,6 +435,57 @@ mod tests {
         assert!(
             outcome.is_ok(),
             "an opaque token must be attempted, not rejected locally"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_cold_start_runs_exactly_one_login() {
+        // Given an empty cache shared by every class's poll task, which all ask
+        // for a session at the same moment the way the scheduler's tasks do.
+        SUCCEEDING_LOGINS.store(0, Ordering::SeqCst);
+        let cache = SessionCache::with_login(config(), succeeding_login);
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let cache = cache.clone();
+            tasks.spawn(async move { cache.session().await.is_ok() });
+        }
+
+        // When every caller is served.
+        let mut served = 0;
+        while let Some(result) = tasks.join_next().await {
+            if result.expect("no task panics") {
+                served += 1;
+            }
+        }
+
+        // Then all of them got a session, but the SSO endpoint was hit once.
+        assert_eq!(served, 8, "every caller must be served");
+        assert_eq!(
+            SUCCEEDING_LOGINS.load(Ordering::SeqCst),
+            1,
+            "a cold cache must not fan out into one login per caller"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_login_backs_off_before_attempting_again() {
+        // Given a cache whose only available login fails.
+        FAILING_LOGINS.store(0, Ordering::SeqCst);
+        let cache = SessionCache::with_login(config(), failing_login);
+
+        // When the session is requested repeatedly in quick succession.
+        let first = cache.session().await;
+        let second = cache.session().await;
+
+        // Then both report the failure, but the second did not reach the
+        // network: an unreachable SSO endpoint must not be hammered once per
+        // polling task.
+        assert!(first.is_err(), "the first login fails");
+        assert!(second.is_err(), "the retry is refused during backoff");
+        assert_eq!(
+            FAILING_LOGINS.load(Ordering::SeqCst),
+            1,
+            "the backoff must suppress the second attempt"
         );
     }
 }

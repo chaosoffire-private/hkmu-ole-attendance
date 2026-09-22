@@ -22,4 +22,4 @@ pub use error::PortError;
 pub type Result<T> = std::result::Result<T, PortError>;
 pub use gateway::{AttendanceGateway, ScheduleGateway};
 pub use notifier::{Notice, Notifier};
-pub use session::SessionProvider;
+pub use session::SessionInvalidator;

@@ -5,7 +5,7 @@ use std::time::Duration;
 use tracing::{info, instrument, warn};
 
 use crate::domain::schedule::{DaySchedule, format_classes_message, select_day};
-use crate::port::session::SessionProvider;
+use crate::port::session::SessionInvalidator;
 use crate::port::{Clock, Notice, Notifier, PortError, ScheduleGateway};
 
 /// Attempts made to retrieve a usable timetable.
@@ -40,7 +40,7 @@ where
     C: Clock,
     G: ScheduleGateway,
     N: Notifier,
-    S: SessionProvider,
+    S: SessionInvalidator,
 {
     let payload = match fetch_with_retries(gateway, session).await {
         Ok(payload) => payload,
@@ -49,7 +49,7 @@ where
                 "**Daily Setup Error**\nDate: {}\nError: {error}",
                 clock.now(zone).strftime("%Y-%m-%d %H:%M:%S %Z")
             );
-            let _ = notifier.notify(Notice::Error, &message).await;
+            notifier.notify(Notice::Error, &message).await;
             return Err(error);
         }
     };
@@ -57,7 +57,7 @@ where
     let today = clock.now(zone).date();
     let schedule = select_day(&payload, today);
     let stamp = clock.now(zone).strftime("%Y-%m-%d %H:%M:%S %Z").to_string();
-    let _ = notifier
+    notifier
         .notify(Notice::Info, &format_classes_message(&schedule, &stamp))
         .await;
 
@@ -79,7 +79,7 @@ async fn fetch_with_retries<G, S>(
 ) -> Result<crate::domain::schedule::TodayClassResponse, PortError>
 where
     G: ScheduleGateway,
-    S: SessionProvider,
+    S: SessionInvalidator,
 {
     let mut last_error: Option<PortError> = None;
 
@@ -96,13 +96,19 @@ where
                     .error_summary()
                     .unwrap_or_else(|| "unsuccessful result".to_owned());
                 warn!(attempt, %reason, "class retrieval returned an error payload");
-                // A rejected session is recoverable: drop it so the next
-                // attempt logs in again rather than replaying a dead cookie.
+                // An unsuccessful payload is this API's way of saying the
+                // session is not usable — the same test `validate` applies — so
+                // drop it and let the next attempt log in afresh.
                 session.invalidate().await;
                 last_error = Some(PortError::Remote(reason));
             }
             Err(error) => {
                 warn!(attempt, %error, "class retrieval failed");
+                // Only a rejected session justifies a fresh login; a transport
+                // blip must not throw away a session that still works.
+                if error.is_session_failure() {
+                    session.invalidate().await;
+                }
                 last_error = Some(error);
             }
         }
@@ -112,4 +118,165 @@ where
     }
 
     Err(last_error.unwrap_or_else(|| PortError::Remote("no attempt produced a payload".to_owned())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FETCH_ATTEMPTS, SetupOutcome, daily_setup};
+    use crate::port::error::PortError;
+    use crate::port::{Notice, SessionInvalidator};
+    use crate::usecase::test_doubles::{
+        FakeClock, RecordingNotifier, ScriptedScheduleGateway, hkt, rejected_payload,
+        successful_payload,
+    };
+
+    fn zone() -> jiff::tz::TimeZone {
+        jiff::tz::TimeZone::get("Asia/Hong_Kong").expect("valid tz")
+    }
+
+    /// A session invalidator that counts how often it was told to discard.
+    #[derive(Debug, Default)]
+    struct CountingInvalidator {
+        invalidations: std::sync::atomic::AtomicU32,
+    }
+
+    impl SessionInvalidator for CountingInvalidator {
+        fn invalidate(&self) -> impl std::future::Future<Output = ()> + Send {
+            self.invalidations
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::future::ready(())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_successful_payload_flows_straight_through() {
+        // Given a service that answers successfully on the first attempt.
+        let gateway = ScriptedScheduleGateway::new(vec![Ok(successful_payload())]);
+        let notifier = RecordingNotifier::default();
+        let session = CountingInvalidator::default();
+
+        // When the daily setup runs.
+        let outcome = daily_setup(
+            &FakeClock::at(hkt("2026-09-21T03:00:00+08:00")),
+            &gateway,
+            &notifier,
+            &session,
+            &zone(),
+        )
+        .await
+        .expect("setup succeeds");
+
+        // Then it reports the retrieved (empty) timetable and never retried,
+        // and it did not discard a session that was working.
+        assert!(matches!(outcome, SetupOutcome::Ready(_)));
+        assert_eq!(gateway.call_count(), 1);
+        assert_eq!(
+            session
+                .invalidations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rejected_payload_discards_the_session_and_retries() {
+        // Given a service that rejects the first attempt, as an expired session
+        // does, then succeeds once a fresh login has happened.
+        let gateway =
+            ScriptedScheduleGateway::new(vec![Ok(rejected_payload()), Ok(successful_payload())]);
+        let notifier = RecordingNotifier::default();
+        let session = CountingInvalidator::default();
+
+        // When the daily setup runs.
+        let outcome = daily_setup(
+            &FakeClock::at(hkt("2026-09-21T03:00:00+08:00")),
+            &gateway,
+            &notifier,
+            &session,
+            &zone(),
+        )
+        .await
+        .expect("setup succeeds on the retry");
+
+        // Then the stale session was discarded so the retry could log in afresh.
+        assert!(matches!(outcome, SetupOutcome::Ready(_)));
+        assert_eq!(gateway.call_count(), 2);
+        assert_eq!(
+            session
+                .invalidations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an unusable payload must discard the session"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transport_error_does_not_discard_a_working_session() {
+        // Given a service that fails at the transport level on the first
+        // attempt — a timeout or reset — then answers correctly.
+        let gateway = ScriptedScheduleGateway::new(vec![
+            Err(PortError::Transport("connection reset".to_owned())),
+            Ok(successful_payload()),
+        ]);
+        let notifier = RecordingNotifier::default();
+        let session = CountingInvalidator::default();
+
+        // When the daily setup runs.
+        let outcome = daily_setup(
+            &FakeClock::at(hkt("2026-09-21T03:00:00+08:00")),
+            &gateway,
+            &notifier,
+            &session,
+            &zone(),
+        )
+        .await
+        .expect("setup succeeds on the retry");
+
+        // Then the session survived, because a network blip is not a dead
+        // session and forcing a fresh six-hop login over it would be waste.
+        assert!(matches!(outcome, SetupOutcome::Ready(_)));
+        assert_eq!(gateway.call_count(), 2);
+        assert_eq!(
+            session
+                .invalidations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a transport failure must not discard a healthy session"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exhausting_every_attempt_reports_failure_and_notifies() {
+        // Given a service that rejects every attempt.
+        let gateway = ScriptedScheduleGateway::new(vec![
+            Ok(rejected_payload()),
+            Ok(rejected_payload()),
+            Ok(rejected_payload()),
+        ]);
+        let notifier = RecordingNotifier::default();
+        let session = CountingInvalidator::default();
+
+        // When the daily setup runs.
+        let outcome = daily_setup(
+            &FakeClock::at(hkt("2026-09-21T03:00:00+08:00")),
+            &gateway,
+            &notifier,
+            &session,
+            &zone(),
+        )
+        .await;
+
+        // Then it gave up after the configured number of attempts, reported the
+        // failure to the operator, and never claimed success.
+        assert!(outcome.is_err(), "no attempt produced a usable timetable");
+        assert_eq!(gateway.call_count(), FETCH_ATTEMPTS);
+        assert!(notifier.contains("**Daily Setup Error**"));
+        assert!(
+            !notifier
+                .bodies_at(Notice::Info)
+                .iter()
+                .any(|b| b.contains("Retrieved Classes")),
+            "a failed retrieval must not report a class list"
+        );
+    }
 }

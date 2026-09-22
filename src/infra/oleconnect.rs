@@ -2,10 +2,10 @@
 
 use tracing::{debug, info, warn};
 
+use super::html;
+use super::session::HttpSession;
+use crate::domain::schedule::{ScheduledClass, TodayClassResponse};
 use crate::error::{AppError, Result};
-use crate::html;
-use crate::models::{ClassInfo, TodayClassResponse};
-use crate::session::Session;
 
 /// Attendance activity type used by the class-activities system.
 const ATTENDANCE_TYPE: &str = "2";
@@ -14,13 +14,15 @@ const ATTENDANCE_TYPE: &str = "2";
 /// and duplicating it here risked the two definitions drifting apart.
 pub use crate::domain::attendance::Submission as AttendanceOutcome;
 
-/// An open attendance activity discovered on a course page.
+/// An attendance activity discovered on a course page.
 #[derive(Debug, Clone)]
 pub struct Activity {
     /// Domino document identifier of the activity.
     pub unid: String,
     /// Raw attendance type reported by the page.
     pub attendance_type: String,
+    /// Whether the page reports a running submission window.
+    pub open: bool,
 }
 
 impl Activity {
@@ -33,7 +35,7 @@ impl Activity {
 /// Client for the OLE portal pages and the `oledb` API.
 #[derive(Debug)]
 pub struct OleClient {
-    session: Session,
+    session: HttpSession,
     api_url: String,
 }
 
@@ -43,7 +45,7 @@ impl OleClient {
         clippy::missing_const_for_fn,
         reason = "String cannot be moved in a const fn"
     )]
-    pub fn new(session: Session, api_url: String) -> Self {
+    pub fn new(session: HttpSession, api_url: String) -> Self {
         Self { session, api_url }
     }
 
@@ -64,12 +66,15 @@ impl OleClient {
     /// # Errors
     /// Returns [`AppError::Parse`] when the page exposes neither an inline
     /// activity nor a task list.
-    pub async fn discover_activity(&mut self, class_info: &ClassInfo) -> Result<Activity> {
-        let list = self.session.get(&class_info.activities_url).await?;
+    pub async fn discover_activity(
+        &mut self,
+        class: &ScheduledClass,
+        activities_url: &str,
+    ) -> Result<Activity> {
+        let list = self.session.get(activities_url).await?;
         if html::is_login_redirect(&list) {
             return Err(AppError::SessionExpired(format!(
-                "{} redirected to the login flow; the session was revoked server-side",
-                class_info.activities_url
+                "{activities_url} redirected to the login flow; the session was revoked server-side"
             )));
         }
         if let Some(activity) = activity_from_page(&list) {
@@ -77,7 +82,7 @@ impl OleClient {
             return Ok(activity);
         }
 
-        let expected = expected_class_id(class_info);
+        let expected = expected_class_id(class);
         let tasks = task_links(&list);
         debug!(candidates = tasks.len(), %expected, "scanning the task list");
 
@@ -94,16 +99,14 @@ impl OleClient {
 
         let mut fallback: Option<Activity> = None;
         for task in ordered {
-            let document = self
-                .open_activity(&class_info.activities_url, &task.unid)
-                .await?;
+            let document = self.open_activity(activities_url, &task.unid).await?;
             let Some(activity) = activity_from_page(&document) else {
                 continue;
             };
             if !activity.is_attendance() {
                 continue;
             }
-            if activity_is_open(&document) {
+            if activity.open {
                 debug!(unid = %activity.unid, "found an open attendance activity");
                 return Ok(activity);
             }
@@ -111,10 +114,7 @@ impl OleClient {
         }
 
         fallback.ok_or_else(|| {
-            AppError::Parse(format!(
-                "no attendance activity found on {}",
-                class_info.activities_url
-            ))
+            AppError::Parse(format!("no attendance activity found on {activities_url}"))
         })
     }
 
@@ -122,7 +122,11 @@ impl OleClient {
     ///
     /// # Errors
     /// Propagates transport failures.
-    pub async fn open_activity(&mut self, activities_url: &str, unid: &str) -> Result<String> {
+    pub(crate) async fn open_activity(
+        &mut self,
+        activities_url: &str,
+        unid: &str,
+    ) -> Result<String> {
         let database = activities_url
             .split(".nsf")
             .next()
@@ -165,17 +169,17 @@ pub struct TaskLink {
 /// The page encodes `{group}-{YYYYMMDD}-{HH:MM}` followed by an activity-type
 /// suffix such as `-N`, so matching on this prefix selects the intended
 /// session without depending on the suffix.
-pub fn expected_class_id(class_info: &ClassInfo) -> String {
+pub(crate) fn expected_class_id(class: &ScheduledClass) -> String {
     format!(
         "{}-{}-{}",
-        class_info.group,
-        class_info.starts_at.strftime("%Y%m%d"),
-        class_info.starts_at.strftime("%H:%M")
+        class.group,
+        class.starts_at.strftime("%Y%m%d"),
+        class.starts_at.strftime("%H:%M")
     )
 }
 
 /// Collect every task link on a class-activities page.
-pub fn task_links(page: &str) -> Vec<TaskLink> {
+pub(crate) fn task_links(page: &str) -> Vec<TaskLink> {
     let mut links = Vec::new();
     let mut cursor = 0;
 
@@ -237,13 +241,14 @@ fn activity_from_page(page: &str) -> Option<Activity> {
     Some(Activity {
         unid,
         attendance_type: html::js_var(page, "attendance_type").unwrap_or_default(),
+        open: activity_is_open(page),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Activity, activity_from_page, expected_class_id, task_links};
-    use crate::models::ClassInfo;
+    use crate::domain::schedule::ScheduledClass;
 
     #[test]
     fn reads_an_inline_activity_from_the_list_page() {
@@ -308,15 +313,14 @@ mod tests {
     #[test]
     fn derives_the_class_id_matching_the_live_markup() {
         // Given the class observed on the live timetable.
-        let class_info = ClassInfo {
+        let class_info = ScheduledClass {
             termcode: "2604".to_owned(),
             course_code: "ELEC3050SEF".to_owned(),
-            class_name: "Lecture ( Full Time )".to_owned(),
+            name: "Lecture ( Full Time )".to_owned(),
             starts_at: jiff::civil::date(2026, 9, 21).at(11, 0, 0, 0),
             ends_at: None,
             group: "L01".to_owned(),
             venue: "HKMU C0G01".to_owned(),
-            activities_url: String::new(),
         };
 
         // When the expected class id is built.
@@ -330,15 +334,14 @@ mod tests {
     #[test]
     fn distinguishes_two_sessions_of_the_same_course() {
         // Given the lecture and tutorial of one course on the same day.
-        let base = ClassInfo {
+        let base = ScheduledClass {
             termcode: "2604".to_owned(),
             course_code: "ELEC3050SEF".to_owned(),
-            class_name: String::new(),
+            name: String::new(),
             starts_at: jiff::civil::date(2026, 9, 21).at(11, 0, 0, 0),
             ends_at: None,
             group: "L01".to_owned(),
             venue: String::new(),
-            activities_url: String::new(),
         };
         let mut tutorial = base.clone();
         tutorial.group = "T01".to_owned();
@@ -357,6 +360,7 @@ mod tests {
         let activity = Activity {
             unid: "ABC".to_owned(),
             attendance_type: "2".to_owned(),
+            open: true,
         };
 
         // When the attendance type is checked.

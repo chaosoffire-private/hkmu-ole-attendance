@@ -107,21 +107,6 @@ pub fn script_redirect(html: &str) -> Option<String> {
     None
 }
 
-/// Extract the URL from a `<meta http-equiv="Refresh" content="0;url=...">`.
-pub fn meta_refresh_url(html: &str) -> Option<String> {
-    let lower = html.to_ascii_lowercase();
-    let start = lower.find("http-equiv=\"refresh\"")?;
-    let rest = html.get(start..)?;
-    let tag_end = rest.find('>')?;
-    let tag = rest.get(..tag_end)?;
-    let content = attribute_value(tag, "content")?;
-    let url_part = content.to_ascii_lowercase();
-    let url_at = url_part.find("url=")?;
-    content
-        .get(url_at.checked_add(4)?..)
-        .map(|value| value.trim().to_owned())
-}
-
 /// Read `attr="value"` out of a tag, tolerating unquoted values.
 pub fn attribute_value(tag: &str, attribute: &str) -> Option<String> {
     let needle = format!("{attribute}=");
@@ -144,7 +129,7 @@ pub fn attribute_value(tag: &str, attribute: &str) -> Option<String> {
 mod tests {
     use super::{
         first_form_action, form_action_containing, input_value_for, is_login_redirect, js_var,
-        meta_refresh_url, script_redirect,
+        script_redirect,
     };
 
     #[test]
@@ -221,19 +206,6 @@ mod tests {
         assert_eq!(
             script_redirect(html).as_deref(),
             Some("https://auth.hkmu.edu.hk:443/nidp/idff/sso?sid=0")
-        );
-    }
-
-    #[test]
-    fn extracts_meta_refresh_target() {
-        // Given a Domino page using a meta refresh to reach the login form.
-        let html = r#"<META HTTP-EQUIV="Refresh" content="0;url=/names.nsf?Login&RedirectTo=x">"#;
-
-        // When the refresh target is read.
-        // Then the relative URL is returned.
-        assert_eq!(
-            meta_refresh_url(html).as_deref(),
-            Some("/names.nsf?Login&RedirectTo=x")
         );
     }
 
@@ -370,6 +342,5 @@ mod tests {
         assert!(first_form_action(html).is_none());
         assert!(input_value_for(html, "Username").is_none());
         assert!(script_redirect(html).is_none());
-        assert!(meta_refresh_url(html).is_none());
     }
 }

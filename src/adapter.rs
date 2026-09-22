@@ -1,13 +1,14 @@
 //! Adapters: the concrete implementations of the ports.
 //!
-//! This is the only layer that knows about `reqwest`, the system clock, or a
-//! Discord webhook. Nothing here is referenced by [`crate::usecase`] or
-//! [`crate::domain`] — the dependency points inward.
+//! Each adapter binds one port to something real — [`crate::infra`] for the
+//! portal's HTTP, the system clock, or a Discord webhook. Nothing here is
+//! referenced by [`crate::usecase`] or [`crate::domain`] — the dependency
+//! points inward.
 
 pub mod clock;
 pub mod notifier;
 pub mod ole_gateway;
 
 pub use clock::SystemClock;
-pub use notifier::{CompositeNotifier, DiscordNotifier, LogNotifier};
-pub use ole_gateway::{CachingSessionProvider, OleAttendanceGateway, OleScheduleGateway};
+pub use notifier::{DiscordNotifier, LogNotifier};
+pub use ole_gateway::{CacheSessionInvalidator, OleAttendanceGateway, OleScheduleGateway};

@@ -121,6 +121,8 @@ git tag v0.3.0 && git push origin v0.3.0
 | `SCHEDULE_TIME`    | `03:00`                    | Time of the daily setup, in `HH:MM`.                                   |
 | `TIMEZONE`         | `Asia/Hong_Kong`           | Timezone for all scheduling and class times.                           |
 | `OLE_URL`          | `https://iole.hkmu.edu.hk` | OLE portal base URL.                                                   |
+| `NAM_LOGIN_URL`    | HKMU NAM endpoint          | SSO credential endpoint. Override only for testing.                    |
+| `OLECONNECT_API_URL` | HKMU `oledb` endpoint    | `getTodayClass` API. Override only for testing.                        |
 | `RUST_LOG`         | `info`                     | Log filter, e.g. `debug` for verbose output.                           |
 
 `SCHEDULE_TIME` accepts `H:MM` or `HH:MM`. Trailing `#` comments are stripped,
@@ -139,7 +141,7 @@ hkmu-ole-attendance --fetch-only
 # Send today's classes to the Discord webhook, exit
 hkmu-ole-attendance --notify-only
 
-# Report whether each class's attendance activity is reachable
+# Report whether each class's attendance activity is reachable (read-only)
 hkmu-ole-attendance --probe
 
 # Submit specific coordinates with attendance (default 0,0)
@@ -147,23 +149,24 @@ hkmu-ole-attendance --coordinates 22.3364,114.1796
 ```
 
 `--fetch-only` and `--probe` are useful for checking that a refreshed
-`SESSION_COOKIE` still works.
+`SESSION_COOKIE` still works. `--probe` only locates each class's activity and
+reports whether its window is open; it never submits attendance.
 
 ## Reporting and notifications
 
-Every message goes through one reporting component, so output is structured
-`tracing` output in all cases — there is no separate print path. Each call
-declares whether it should also be mirrored to Discord:
+Every message goes through the `Notifier` port, so output is structured
+`tracing` output in all cases — there is no separate print path. The
+implementation decides the transport:
 
-| Call | Behaviour |
+| Implementation | Behaviour |
 | --- | --- |
-| `Mirror::Log` | Logged only. Used for `--fetch-only` and `--probe` diagnostics. |
-| `Mirror::Discord` | Logged, **then** posted to Discord when a webhook is set. |
+| `LogNotifier` | Logged only. Used for `--fetch-only` and `--probe` diagnostics. |
+| `DiscordNotifier` | Logged, **then** posted to Discord when a webhook is set. |
 
-Discord delivery is awaited inside the same call, so a mirrored report is
-complete once it returns. A delivery failure is logged and swallowed: reports
-are advisory, and a webhook outage must never prevent attendance from being
-recorded.
+Notification is infallible by design: delivery is awaited inside the call, so a
+report is complete once it returns, and a delivery failure is logged and
+swallowed. Reports are advisory, and a webhook outage must never prevent
+attendance from being recorded.
 
 Create a webhook via `Edit Channel > Integrations > Webhooks > New Webhook` and
 put the URL in `DISCORD_WEBHOOK`. You will be notified when the class list is
