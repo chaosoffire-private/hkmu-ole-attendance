@@ -6,6 +6,7 @@
 use tracing::{debug, warn};
 
 use crate::domain::attendance::Submission;
+use crate::domain::geo::Coordinates;
 use crate::domain::schedule::{ScheduledClass, TodayClassResponse};
 use crate::infra::oleconnect::{Activity, OleClient};
 use crate::infra::session_cache::SessionCache;
@@ -78,7 +79,7 @@ impl AttendanceGateway for OleAttendanceGateway {
     async fn submit(
         &self,
         class: &ScheduledClass,
-        coordinates: Option<(f64, f64)>,
+        coordinates: Option<Coordinates>,
     ) -> Result<Submission, PortError> {
         let activity = self.locate(class).await?;
         let activities = activities_url(&self.ole_url, class);

@@ -13,6 +13,7 @@ use crate::domain::attendance::{
     Action, ClassWindow, Submission, confirmed_message, failed_message, next_action, should_warn,
     warning_message,
 };
+use crate::domain::geo::Coordinates;
 use crate::domain::schedule::ScheduledClass;
 use crate::domain::time::minutes_until;
 use crate::port::{AttendanceGateway, Clock, Notice, Notifier, SessionInvalidator};
@@ -39,7 +40,7 @@ struct Poll<'a, C, G, N, S> {
     session: &'a S,
     class: &'a ScheduledClass,
     window: ClassWindow,
-    coordinates: Option<(f64, f64)>,
+    coordinates: Option<Coordinates>,
     zone: &'a jiff::tz::TimeZone,
     interval: Duration,
     warning_threshold: Duration,
@@ -218,7 +219,7 @@ pub struct PollParts<'a, C, G, N, S> {
     /// Provides and invalidates the session.
     pub session: &'a S,
     /// Coordinates submitted with attendance.
-    pub coordinates: Option<(f64, f64)>,
+    pub coordinates: Option<Coordinates>,
     /// Zone the schedule is expressed in.
     pub zone: &'a jiff::tz::TimeZone,
     /// Delay between polls.
@@ -239,7 +240,8 @@ mod tests {
     use crate::port::Notice;
     use crate::port::error::{PortError, SessionFailure};
     use crate::usecase::test_doubles::{
-        FakeClock, FakeSession, RecordingNotifier, ScriptedGateway, class_from, hkt,
+        FakeClock, FakeSessionInvalidator, RecordingNotifier, ScriptedAttendanceGateway,
+        class_from, hkt,
     };
 
     fn zone() -> jiff::tz::TimeZone {
@@ -253,9 +255,9 @@ mod tests {
     async fn confirms_on_the_first_successful_submission() {
         // Given a class in progress and a server that accepts immediately.
         let clock = FakeClock::at(hkt("2026-09-21T11:30:00+08:00"));
-        let gateway = ScriptedGateway::new(vec![Ok(Submission::Confirmed)]);
+        let gateway = ScriptedAttendanceGateway::new(vec![Ok(Submission::Confirmed)]);
         let notifier = RecordingNotifier::default();
-        let session = FakeSession::default();
+        let session = FakeSessionInvalidator::default();
         let class = class_from(11, 12);
 
         // When attendance is polled.
@@ -290,9 +292,10 @@ mod tests {
         // Given a class that ends at 12:00 and a clock at 11:59, so the poll
         // loop ends by the clock rather than by the outcome.
         let clock = FakeClock::at(hkt("2026-09-21T11:59:30+08:00"));
-        let gateway = ScriptedGateway::new(vec![Ok(Submission::Confirmed), Ok(Submission::NotYet)]);
+        let gateway =
+            ScriptedAttendanceGateway::new(vec![Ok(Submission::Confirmed), Ok(Submission::NotYet)]);
         let notifier = RecordingNotifier::default();
-        let session = FakeSession::default();
+        let session = FakeSessionInvalidator::default();
         let class = class_from(11, 12);
 
         // When attendance is polled.
@@ -325,9 +328,9 @@ mod tests {
     async fn an_already_finished_class_is_skipped_without_submitting() {
         // Given a class that ended at 12:00 and a clock at 13:00.
         let clock = FakeClock::at(hkt("2026-09-21T13:00:00+08:00"));
-        let gateway = ScriptedGateway::new(vec![Ok(Submission::Confirmed)]);
+        let gateway = ScriptedAttendanceGateway::new(vec![Ok(Submission::Confirmed)]);
         let notifier = RecordingNotifier::default();
-        let session = FakeSession::default();
+        let session = FakeSessionInvalidator::default();
         let class = class_from(11, 12);
 
         // When attendance is polled.
@@ -357,9 +360,9 @@ mod tests {
         // Given a class starting at 11:00 and a clock at 11:00 sharp, so the
         // wait path resolves to zero and polling begins immediately.
         let clock = FakeClock::at(hkt("2026-09-21T11:00:00+08:00"));
-        let gateway = ScriptedGateway::new(vec![Ok(Submission::Confirmed)]);
+        let gateway = ScriptedAttendanceGateway::new(vec![Ok(Submission::Confirmed)]);
         let notifier = RecordingNotifier::default();
-        let session = FakeSession::default();
+        let session = FakeSessionInvalidator::default();
         let class = class_from(11, 12);
 
         // When attendance is polled.
@@ -389,14 +392,14 @@ mod tests {
         // Given a gateway whose first call reports the session was revoked,
         // and a second call that succeeds.
         let clock = FakeClock::at(hkt("2026-09-21T11:00:00+08:00"));
-        let gateway = ScriptedGateway::new(vec![
+        let gateway = ScriptedAttendanceGateway::new(vec![
             Err(PortError::Session(SessionFailure::Expired(
                 "revoked server-side".to_owned(),
             ))),
             Ok(Submission::Confirmed),
         ]);
         let notifier = RecordingNotifier::default();
-        let session = FakeSession::default();
+        let session = FakeSessionInvalidator::default();
         let class = class_from(11, 12);
 
         // When attendance is polled. The clock is advanced by the poll interval
@@ -430,9 +433,9 @@ mod tests {
     async fn a_closed_window_stops_polling_early() {
         // Given a class in progress whose window has already closed.
         let clock = FakeClock::at(hkt("2026-09-21T11:30:00+08:00"));
-        let gateway = ScriptedGateway::new(vec![Ok(Submission::Closed)]);
+        let gateway = ScriptedAttendanceGateway::new(vec![Ok(Submission::Closed)]);
         let notifier = RecordingNotifier::default();
-        let session = FakeSession::default();
+        let session = FakeSessionInvalidator::default();
         let class = class_from(11, 12);
 
         // When attendance is polled.
@@ -466,7 +469,7 @@ mod tests {
         // with the clock advancing 20 minutes per poll so the class window is
         // genuinely outlived rather than frozen.
         let clock = Arc::new(FakeClock::at(hkt("2026-09-21T11:10:00+08:00")));
-        let gateway = ScriptedGateway::advancing(
+        let gateway = ScriptedAttendanceGateway::advancing(
             vec![
                 Ok(Submission::NotYet),
                 Ok(Submission::NotYet),
@@ -477,7 +480,7 @@ mod tests {
             20 * 60,
         );
         let notifier = RecordingNotifier::default();
-        let session = FakeSession::default();
+        let session = FakeSessionInvalidator::default();
         let class = class_from(11, 12);
 
         // When attendance is polled until the window closes.
@@ -511,7 +514,7 @@ mod tests {
         // 30-minute warning threshold, with the clock advancing 5 minutes per
         // poll so several attempts land inside the window.
         let clock = Arc::new(FakeClock::at(hkt("2026-09-21T11:35:00+08:00")));
-        let gateway = ScriptedGateway::advancing(
+        let gateway = ScriptedAttendanceGateway::advancing(
             vec![
                 Ok(Submission::NotYet),
                 Ok(Submission::NotYet),
@@ -523,7 +526,7 @@ mod tests {
             5 * 60,
         );
         let notifier = RecordingNotifier::default();
-        let session = FakeSession::default();
+        let session = FakeSessionInvalidator::default();
         let class = class_from(11, 12);
 
         // When attendance is polled until the window closes.

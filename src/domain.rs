@@ -6,6 +6,7 @@
 
 pub mod attendance;
 pub mod error;
+pub mod geo;
 pub mod schedule;
 pub mod time;
 

@@ -4,15 +4,13 @@ use tracing::{debug, info, warn};
 
 use super::html;
 use super::session::HttpSession;
+use crate::domain::attendance::Submission;
+use crate::domain::geo::Coordinates;
 use crate::domain::schedule::{ScheduledClass, TodayClassResponse};
 use crate::error::{AppError, Result};
 
 /// Attendance activity type used by the class-activities system.
 const ATTENDANCE_TYPE: &str = "2";
-
-/// Re-exported from the domain: the submission outcome is domain knowledge,
-/// and duplicating it here risked the two definitions drifting apart.
-pub use crate::domain::attendance::Submission as AttendanceOutcome;
 
 /// An attendance activity discovered on a course page.
 #[derive(Debug, Clone)]
@@ -144,12 +142,16 @@ impl OleClient {
         &mut self,
         activities_url: &str,
         unid: &str,
-        coordinates: Option<(f64, f64)>,
-    ) -> Result<AttendanceOutcome> {
-        let (lat, lng) = coordinates.unwrap_or((0.0, 0.0));
-        let url = format!("{activities_url}?createdocument&puid={unid}&lat={lat}&lng={lng}");
+        coordinates: Option<Coordinates>,
+    ) -> Result<Submission> {
+        let point = coordinates.unwrap_or(Coordinates::ORIGIN);
+        let url = format!(
+            "{activities_url}?createdocument&puid={unid}&lat={}&lng={}",
+            point.latitude(),
+            point.longitude()
+        );
         let body = self.session.get(&url).await?;
-        let outcome = AttendanceOutcome::classify(&body);
+        let outcome = Submission::classify(&body);
         info!(?outcome, "attendance submission answered");
         Ok(outcome)
     }
@@ -355,8 +357,8 @@ mod tests {
     }
 
     #[test]
-    fn defaults_coordinates_to_origin() {
-        // Given an activity type and no geolocation available.
+    fn recognises_the_attendance_activity_type() {
+        // Given an activity of the geolocation-backed attendance type.
         let activity = Activity {
             unid: "ABC".to_owned(),
             attendance_type: "2".to_owned(),
@@ -364,7 +366,7 @@ mod tests {
         };
 
         // When the attendance type is checked.
-        // Then it is recognised as the geolocation-backed attendance activity.
+        // Then it is recognised, so only real attendance activities are driven.
         assert!(activity.is_attendance());
     }
 }

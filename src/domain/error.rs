@@ -20,4 +20,11 @@ pub enum DomainError {
         /// The rejected input.
         raw: String,
     },
+
+    /// A coordinate pair the domain refused to construct.
+    #[error("invalid coordinates: {reason}")]
+    InvalidCoordinates {
+        /// Why the pair was rejected.
+        reason: &'static str,
+    },
 }

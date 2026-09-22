@@ -12,7 +12,7 @@ use crate::error::{AppError, Result};
 const UNIVERSITY_DOMAIN: &str = ".hkmu.edu.hk";
 /// Marker identifying the Domino silent-SSO bridge form.
 const SILENT_SSO_MARKER: &str = "nov-ss-ff-silent";
-/// The password field the NAM credential form names.
+/// The username field the NAM credential form names.
 const NAM_USER_FIELD: &str = "Ecom_User_ID";
 /// The password field the NAM credential form names.
 const NAM_PASSWORD_FIELD: &str = "Ecom_Password";
@@ -95,11 +95,41 @@ impl Authenticator {
     /// Drive the full NAM -> Domino SSO chain with a username and password.
     async fn via_sso(&self, student_id: &str, password: &str) -> Result<HttpSession> {
         let mut session = HttpSession::new()?;
+        self.fetch_landing_page(&mut session).await?;
+        let credentials_form = self
+            .submit_credentials(&mut session, student_id, password)
+            .await?;
+        let assertion = self
+            .follow_saml_assertion(&mut session, &credentials_form)
+            .await?;
+        let bridge = self.enter_domino_bridge(&mut session, &assertion).await?;
+        let dashboard = self.complete_domino_login(&mut session, &bridge).await?;
 
+        if !dashboard.contains("myOLE") && !dashboard.contains("Welcome") {
+            warn!("dashboard markers absent after Domino login");
+        }
+        if self.validate(&mut session).await? {
+            info!(cookies = session.cookies().len(), "SSO login succeeded");
+            return Ok(session);
+        }
+        Err(AppError::Auth(
+            "SSO chain completed but the OLE API still rejected the session".to_owned(),
+        ))
+    }
+
+    async fn fetch_landing_page(&self, session: &mut HttpSession) -> Result<()> {
         let landing = session.get(&self.config.ole_url).await?;
         debug!(bytes = landing.len(), "fetched login landing page");
+        Ok(())
+    }
 
-        let credentials_form = session
+    async fn submit_credentials(
+        &self,
+        session: &mut HttpSession,
+        student_id: &str,
+        password: &str,
+    ) -> Result<String> {
+        session
             .post_form(
                 &self.config.nam_login_url,
                 &[
@@ -109,24 +139,35 @@ impl Authenticator {
                     ("loginButton2", "Login"),
                 ],
             )
-            .await?;
+            .await
+    }
 
-        let assertion_url = html::script_redirect(&credentials_form).ok_or_else(|| {
+    async fn follow_saml_assertion(
+        &self,
+        session: &mut HttpSession,
+        credentials_form: &str,
+    ) -> Result<String> {
+        let assertion_url = html::script_redirect(credentials_form).ok_or_else(|| {
             AppError::Auth(
                 "NAM did not return a post-login redirect; password may be wrong".to_owned(),
             )
         })?;
         debug!("following SAML assertion");
+        session.get(&assertion_url).await
+    }
 
-        let assertion = session.get(&assertion_url).await?;
-        let bridge_action = html::form_action_containing(&assertion, SILENT_SSO_MARKER)
-            .or_else(|| html::first_form_action(&assertion))
+    async fn enter_domino_bridge(
+        &self,
+        session: &mut HttpSession,
+        assertion: &str,
+    ) -> Result<String> {
+        let bridge_action = html::form_action_containing(assertion, SILENT_SSO_MARKER)
+            .or_else(|| html::first_form_action(assertion))
             .ok_or_else(|| {
                 AppError::Auth("OLE landing page exposed no Domino login form".to_owned())
             })?;
-
         let bridge_url = absolute(&self.config.ole_url, &bridge_action)?;
-        let bridge = session
+        session
             .post_form(
                 &bridge_url,
                 &[
@@ -134,21 +175,26 @@ impl Authenticator {
                     ("RedirectTo", "/OLEhome.nsf/OLEHome?ReadForm"),
                 ],
             )
-            .await?;
+            .await
+    }
 
-        let domino_user = html::input_value_for(&bridge, "Username").ok_or_else(|| {
+    async fn complete_domino_login(
+        &self,
+        session: &mut HttpSession,
+        bridge: &str,
+    ) -> Result<String> {
+        let domino_user = html::input_value_for(bridge, "Username").ok_or_else(|| {
             AppError::Auth("Domino bridge page carried no username field".to_owned())
         })?;
-        let domino_password = html::input_value_for(&bridge, "Password").ok_or_else(|| {
+        let domino_password = html::input_value_for(bridge, "Password").ok_or_else(|| {
             AppError::Auth("Domino bridge page carried no password field".to_owned())
         })?;
-
-        let login_action = html::form_action_containing(&bridge, "names.nsf").ok_or_else(|| {
+        let login_action = html::form_action_containing(bridge, "names.nsf").ok_or_else(|| {
             AppError::Auth("Domino bridge page carried no login action".to_owned())
         })?;
         let login_url = absolute(&self.config.ole_url, &login_action)?;
 
-        let dashboard = session
+        session
             .post_form(
                 &login_url,
                 &[
@@ -158,19 +204,7 @@ impl Authenticator {
                     ("Password", &domino_password),
                 ],
             )
-            .await?;
-
-        if !dashboard.contains("myOLE") && !dashboard.contains("Welcome") {
-            warn!("dashboard markers absent after Domino login");
-        }
-
-        if self.validate(&mut session).await? {
-            info!(cookies = session.cookies().len(), "SSO login succeeded");
-            return Ok(session);
-        }
-        Err(AppError::Auth(
-            "SSO chain completed but the OLE API still rejected the session".to_owned(),
-        ))
+            .await
     }
 
     /// Confirm the session can call the class API.

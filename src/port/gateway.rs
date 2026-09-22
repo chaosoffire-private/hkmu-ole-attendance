@@ -2,6 +2,7 @@
 
 use super::error::PortError;
 use crate::domain::attendance::Submission;
+use crate::domain::geo::Coordinates;
 use crate::domain::schedule::{ScheduledClass, TodayClassResponse};
 
 /// Reads the day's timetable from the remote service.
@@ -34,7 +35,7 @@ pub trait AttendanceGateway: Send + Sync {
     fn submit(
         &self,
         class: &ScheduledClass,
-        coordinates: Option<(f64, f64)>,
+        coordinates: Option<Coordinates>,
     ) -> impl std::future::Future<Output = Result<Submission, PortError>> + Send;
 }
 

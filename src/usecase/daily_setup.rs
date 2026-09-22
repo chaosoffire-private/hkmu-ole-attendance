@@ -123,29 +123,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::{FETCH_ATTEMPTS, SetupOutcome, daily_setup};
+    use crate::port::Notice;
     use crate::port::error::PortError;
-    use crate::port::{Notice, SessionInvalidator};
     use crate::usecase::test_doubles::{
-        FakeClock, RecordingNotifier, ScriptedScheduleGateway, hkt, rejected_payload,
-        successful_payload,
+        FakeClock, FakeSessionInvalidator, RecordingNotifier, ScriptedScheduleGateway, hkt,
+        rejected_payload, successful_payload,
     };
 
     fn zone() -> jiff::tz::TimeZone {
         jiff::tz::TimeZone::get("Asia/Hong_Kong").expect("valid tz")
-    }
-
-    /// A session invalidator that counts how often it was told to discard.
-    #[derive(Debug, Default)]
-    struct CountingInvalidator {
-        invalidations: std::sync::atomic::AtomicU32,
-    }
-
-    impl SessionInvalidator for CountingInvalidator {
-        fn invalidate(&self) -> impl std::future::Future<Output = ()> + Send {
-            self.invalidations
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            std::future::ready(())
-        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -153,7 +139,7 @@ mod tests {
         // Given a service that answers successfully on the first attempt.
         let gateway = ScriptedScheduleGateway::new(vec![Ok(successful_payload())]);
         let notifier = RecordingNotifier::default();
-        let session = CountingInvalidator::default();
+        let session = FakeSessionInvalidator::default();
 
         // When the daily setup runs.
         let outcome = daily_setup(
@@ -170,12 +156,7 @@ mod tests {
         // and it did not discard a session that was working.
         assert!(matches!(outcome, SetupOutcome::Ready(_)));
         assert_eq!(gateway.call_count(), 1);
-        assert_eq!(
-            session
-                .invalidations
-                .load(std::sync::atomic::Ordering::SeqCst),
-            0
-        );
+        assert_eq!(session.invalidations(), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -185,7 +166,7 @@ mod tests {
         let gateway =
             ScriptedScheduleGateway::new(vec![Ok(rejected_payload()), Ok(successful_payload())]);
         let notifier = RecordingNotifier::default();
-        let session = CountingInvalidator::default();
+        let session = FakeSessionInvalidator::default();
 
         // When the daily setup runs.
         let outcome = daily_setup(
@@ -202,9 +183,7 @@ mod tests {
         assert!(matches!(outcome, SetupOutcome::Ready(_)));
         assert_eq!(gateway.call_count(), 2);
         assert_eq!(
-            session
-                .invalidations
-                .load(std::sync::atomic::Ordering::SeqCst),
+            session.invalidations(),
             1,
             "an unusable payload must discard the session"
         );
@@ -219,7 +198,7 @@ mod tests {
             Ok(successful_payload()),
         ]);
         let notifier = RecordingNotifier::default();
-        let session = CountingInvalidator::default();
+        let session = FakeSessionInvalidator::default();
 
         // When the daily setup runs.
         let outcome = daily_setup(
@@ -237,9 +216,7 @@ mod tests {
         assert!(matches!(outcome, SetupOutcome::Ready(_)));
         assert_eq!(gateway.call_count(), 2);
         assert_eq!(
-            session
-                .invalidations
-                .load(std::sync::atomic::Ordering::SeqCst),
+            session.invalidations(),
             0,
             "a transport failure must not discard a healthy session"
         );
@@ -254,7 +231,7 @@ mod tests {
             Ok(rejected_payload()),
         ]);
         let notifier = RecordingNotifier::default();
-        let session = CountingInvalidator::default();
+        let session = FakeSessionInvalidator::default();
 
         // When the daily setup runs.
         let outcome = daily_setup(

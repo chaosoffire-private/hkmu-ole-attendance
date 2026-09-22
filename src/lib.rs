@@ -5,11 +5,11 @@
 //! involved.
 
 pub mod adapter;
+pub mod app;
 pub mod config;
 pub mod domain;
 pub mod error;
 pub mod infra;
 pub mod port;
-pub mod scheduler;
 pub mod secret;
 pub mod usecase;

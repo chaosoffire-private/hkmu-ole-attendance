@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use jiff::{Timestamp, Zoned};
 
 use crate::domain::attendance::Submission;
+use crate::domain::geo::Coordinates;
 use crate::domain::schedule::{ScheduledClass, TodayClassResponse};
 use crate::port::error::PortError;
 use crate::port::gateway::ActivityReport;
@@ -105,13 +106,13 @@ impl Notifier for RecordingNotifier {
 /// Optionally advances a [`FakeClock`] on each call, because a poll loop that
 /// observes a frozen clock would never leave its window.
 #[derive(Debug)]
-pub struct ScriptedGateway {
+pub struct ScriptedAttendanceGateway {
     outcomes: Mutex<VecDeque<Result<Submission, PortError>>>,
     submissions: Mutex<u32>,
     clock: Option<(Arc<FakeClock>, i64)>,
 }
 
-impl ScriptedGateway {
+impl ScriptedAttendanceGateway {
     /// Replay `outcomes` in order; the last one repeats once exhausted.
     pub fn new(outcomes: Vec<Result<Submission, PortError>>) -> Self {
         Self {
@@ -140,7 +141,7 @@ impl ScriptedGateway {
     }
 }
 
-impl AttendanceGateway for ScriptedGateway {
+impl AttendanceGateway for ScriptedAttendanceGateway {
     fn probe(
         &self,
         _class: &ScheduledClass,
@@ -155,7 +156,7 @@ impl AttendanceGateway for ScriptedGateway {
     fn submit(
         &self,
         _class: &ScheduledClass,
-        _coordinates: Option<(f64, f64)>,
+        _coordinates: Option<Coordinates>,
     ) -> impl std::future::Future<Output = Result<Submission, PortError>> + Send {
         *self.submissions.lock().expect("gateway lock") += 1;
         if let Some((clock, seconds)) = &self.clock {
@@ -177,18 +178,18 @@ impl AttendanceGateway for ScriptedGateway {
 
 /// A session invalidator that only counts invalidations.
 #[derive(Debug, Default)]
-pub struct FakeSession {
+pub struct FakeSessionInvalidator {
     invalidations: Mutex<u32>,
 }
 
-impl FakeSession {
+impl FakeSessionInvalidator {
     /// How many times the session was invalidated.
     pub fn invalidations(&self) -> u32 {
         *self.invalidations.lock().expect("session lock")
     }
 }
 
-impl SessionInvalidator for FakeSession {
+impl SessionInvalidator for FakeSessionInvalidator {
     fn invalidate(&self) -> impl std::future::Future<Output = ()> + Send {
         *self.invalidations.lock().expect("session lock") += 1;
         std::future::ready(())
@@ -198,27 +199,6 @@ impl SessionInvalidator for FakeSession {
 /// The error reported once a script runs out of entries.
 fn exhausted() -> PortError {
     PortError::Remote("script exhausted".to_owned())
-}
-
-/// A schedule gateway returning a fixed payload.
-#[derive(Debug)]
-pub struct FixedScheduleGateway {
-    payload: TodayClassResponse,
-}
-
-impl FixedScheduleGateway {
-    /// Serve `payload` for every request.
-    pub fn new(payload: TodayClassResponse) -> Self {
-        Self { payload }
-    }
-}
-
-impl ScheduleGateway for FixedScheduleGateway {
-    fn today_classes(
-        &self,
-    ) -> impl std::future::Future<Output = Result<TodayClassResponse, PortError>> + Send {
-        std::future::ready(Ok(self.payload.clone()))
-    }
 }
 
 /// A schedule gateway that replays a scripted sequence of results.
