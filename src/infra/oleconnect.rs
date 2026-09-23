@@ -4,9 +4,10 @@ use tracing::{debug, info, warn};
 
 use super::html;
 use super::session::HttpSession;
+use super::wire::WireResponse;
 use crate::domain::attendance::Submission;
 use crate::domain::geo::Coordinates;
-use crate::domain::schedule::{ScheduledClass, TodayClassResponse};
+use crate::domain::schedule::{ScheduledClass, Timetable};
 use crate::error::{AppError, Result};
 
 /// Attendance activity type used by the class-activities system.
@@ -50,13 +51,14 @@ impl OleClient {
     /// Fetch the day's timetable from the `oledb` API.
     ///
     /// # Errors
-    /// Returns [`AppError::Api`] when the API rejects the session.
-    pub async fn fetch_today_classes(&mut self) -> Result<TodayClassResponse> {
-        let payload: TodayClassResponse = self.session.get_json(&self.api_url).await?;
-        if let Some(summary) = payload.error_summary() {
+    /// Propagates transport failures and a payload that is not JSON.
+    pub async fn fetch_today_classes(&mut self) -> Result<Timetable> {
+        let wire: WireResponse = self.session.get_json(&self.api_url).await?;
+        let timetable = Timetable::from(wire);
+        if let Some(summary) = timetable.error_summary() {
             warn!(error = %summary, "OLE API returned an error payload");
         }
-        Ok(payload)
+        Ok(timetable)
     }
 
     /// Discover the open attendance activity on a course's activities page.

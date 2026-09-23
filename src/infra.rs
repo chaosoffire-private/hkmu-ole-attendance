@@ -12,5 +12,6 @@ pub mod ltpa;
 pub mod oleconnect;
 pub mod session;
 pub mod session_cache;
+pub(crate) mod wire;
 
 pub use session_cache::SessionCache;

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use tracing::{info, instrument, warn};
 
-use crate::domain::schedule::{DaySchedule, format_classes_message, select_day};
+use crate::domain::schedule::{DaySchedule, Timetable, format_classes_message, select_day};
 use crate::port::session::SessionInvalidator;
 use crate::port::{Clock, Notice, Notifier, PortError, ScheduleGateway};
 
@@ -66,7 +66,7 @@ where
         .notify(Notice::Info, &format_classes_message(&schedule, &stamp))
         .await;
 
-    if !schedule.result.is_success() {
+    if !schedule.is_success() {
         let reason = payload
             .error_summary()
             .unwrap_or_else(|| "unsuccessful result".to_owned());
@@ -82,7 +82,7 @@ async fn fetch_with_retries<G, I>(
     gateway: &G,
     invalidator: &I,
     retry: RetryPolicy,
-) -> Result<crate::domain::schedule::TodayClassResponse, PortError>
+) -> Result<Timetable, PortError>
 where
     G: ScheduleGateway,
     I: SessionInvalidator,
@@ -133,7 +133,7 @@ mod tests {
     use crate::port::error::PortError;
     use crate::usecase::test_doubles::{
         FakeClock, FakeSessionInvalidator, RecordingNotifier, ScriptedScheduleGateway, hkt,
-        rejected_payload, successful_payload,
+        rejected_timetable, successful_timetable,
     };
 
     fn zone() -> jiff::tz::TimeZone {
@@ -151,7 +151,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_successful_payload_flows_straight_through() {
         // Given a service that answers successfully on the first attempt.
-        let gateway = ScriptedScheduleGateway::new(vec![Ok(successful_payload())]);
+        let gateway = ScriptedScheduleGateway::new(vec![Ok(successful_timetable())]);
         let notifier = RecordingNotifier::default();
         let invalidator = FakeSessionInvalidator::default();
 
@@ -178,8 +178,10 @@ mod tests {
     async fn a_rejected_payload_discards_the_session_and_retries() {
         // Given a service that rejects the first attempt, as an expired session
         // does, then succeeds once a fresh login has happened.
-        let gateway =
-            ScriptedScheduleGateway::new(vec![Ok(rejected_payload()), Ok(successful_payload())]);
+        let gateway = ScriptedScheduleGateway::new(vec![
+            Ok(rejected_timetable()),
+            Ok(successful_timetable()),
+        ]);
         let notifier = RecordingNotifier::default();
         let invalidator = FakeSessionInvalidator::default();
 
@@ -211,7 +213,7 @@ mod tests {
         // attempt — a timeout or reset — then answers correctly.
         let gateway = ScriptedScheduleGateway::new(vec![
             Err(PortError::Transport("connection reset".to_owned())),
-            Ok(successful_payload()),
+            Ok(successful_timetable()),
         ]);
         let notifier = RecordingNotifier::default();
         let invalidator = FakeSessionInvalidator::default();
@@ -243,9 +245,9 @@ mod tests {
     async fn exhausting_every_attempt_reports_failure_and_notifies() {
         // Given a service that rejects every attempt.
         let gateway = ScriptedScheduleGateway::new(vec![
-            Ok(rejected_payload()),
-            Ok(rejected_payload()),
-            Ok(rejected_payload()),
+            Ok(rejected_timetable()),
+            Ok(rejected_timetable()),
+            Ok(rejected_timetable()),
         ]);
         let notifier = RecordingNotifier::default();
         let invalidator = FakeSessionInvalidator::default();

@@ -126,6 +126,15 @@ impl CookieStore {
             match key.to_ascii_lowercase().as_str() {
                 "domain" => {
                     if !val.is_empty() {
+                        // RFC 6265 §5.3 step 6: a Domain that does not
+                        // domain-match the responding host must be rejected, or
+                        // any host the client talks to could set a cookie
+                        // scoped to the whole university and overwrite the
+                        // session token.
+                        let host = request_url.host_str()?;
+                        if !host_matches(host, val) {
+                            return None;
+                        }
                         val.clone_into(&mut cookie.domain);
                     }
                 }
@@ -279,7 +288,8 @@ mod tests {
 
     #[test]
     fn parses_parent_domain_cookie() {
-        // Given a cookie explicitly scoped to the whole university.
+        // Given a cookie explicitly scoped to the whole university, set by a
+        // host that is itself under that domain.
         let header = "LtpaToken=xyz; Path=/; Domain=.hkmu.edu.hk";
 
         // When parsed.
@@ -288,6 +298,31 @@ mod tests {
 
         // Then the parent domain is recorded verbatim.
         assert_eq!(parsed.domain, ".hkmu.edu.hk");
+    }
+
+    #[test]
+    fn rejects_a_domain_that_does_not_match_the_responding_host() {
+        // Given a cookie claiming a domain the responding host is not part of.
+        let header = "LtpaToken=attacker; Path=/; Domain=.hkmu.edu.hk";
+
+        // When parsed against an unrelated host.
+        let parsed = CookieStore::parse_set_cookie(header, &url("https://evil.example/x"));
+
+        // Then it is rejected, so no host can plant a cookie for the university.
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn rejects_a_sibling_domain_that_merely_shares_a_suffix() {
+        // Given a host that ends with the same letters but not at a label
+        // boundary, which must not be treated as a subdomain.
+        let header = "LtpaToken=attacker; Path=/; Domain=.hkmu.edu.hk";
+
+        // When parsed against that host.
+        let parsed = CookieStore::parse_set_cookie(header, &url("https://evilhkmu.edu.hk/x"));
+
+        // Then it is rejected.
+        assert!(parsed.is_none());
     }
 
     #[test]

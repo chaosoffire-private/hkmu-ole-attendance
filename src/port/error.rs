@@ -56,10 +56,12 @@ impl From<AppError> for PortError {
         match error {
             AppError::SessionRejected(reason) => Self::Session(SessionFailure::Rejected(reason)),
             AppError::SessionExpired(reason) => Self::Session(SessionFailure::Expired(reason)),
-            AppError::Http(source) => Self::Transport(source.to_string()),
-            AppError::Api(reason) | AppError::Parse(reason) | AppError::Config(reason) => {
-                Self::Unexpected(reason)
+            AppError::Http(source) => Self::Transport(describe(&source)),
+            AppError::Api(reason) => Self::Remote(reason),
+            AppError::HttpStatus { status, url } => {
+                Self::Remote(format!("HTTP {status} from {url}"))
             }
+            AppError::Parse(reason) | AppError::Config(reason) => Self::Unexpected(reason),
             AppError::Auth(reason) => Self::Session(SessionFailure::Unavailable(reason)),
             AppError::Json(source) => Self::Unexpected(source.to_string()),
             AppError::Url(source) => Self::Unexpected(source.to_string()),
@@ -69,9 +71,26 @@ impl From<AppError> for PortError {
     }
 }
 
+/// Render an error together with its source chain.
+///
+/// `reqwest::Error`'s own `Display` names only the request kind and URL, so a
+/// timeout, a TLS rejection and a DNS failure would otherwise collapse into one
+/// indistinguishable message. In a `FROM scratch` container the log is the only
+/// diagnostic, so the cause must be carried across the port boundary.
+fn describe(error: &dyn std::error::Error) -> String {
+    let mut rendered = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        rendered.push_str(": ");
+        rendered.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    rendered
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PortError, SessionFailure};
+    use super::{PortError, SessionFailure, describe};
     use crate::error::AppError;
 
     #[test]
@@ -111,5 +130,69 @@ mod tests {
         assert!(!parse.is_session_failure());
         assert!(!api.is_session_failure());
         assert_eq!(parse, PortError::Unexpected("no activity".to_owned()));
+    }
+
+    #[test]
+    fn an_api_rejection_stays_a_remote_error() {
+        // Given the API signalling that the session is not permitted.
+        let mapped = PortError::from(AppError::Api("9901: only for web users".to_owned()));
+
+        // Then it is a remote error, not an "unexpected response": the server
+        // answered, and the operator needs to know that distinction.
+        assert_eq!(
+            mapped,
+            PortError::Remote("9901: only for web users".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_non_success_status_is_reported_as_a_remote_error() {
+        // Given the server answering with an HTTP error status.
+        let mapped = PortError::from(AppError::HttpStatus {
+            status: 503,
+            url: "https://oleconnect.hkmu.edu.hk/x".to_owned(),
+        });
+
+        // Then the status survives into the port vocabulary, so a 5xx is not
+        // mistaken for a page whose layout changed.
+        assert!(!mapped.is_session_failure());
+        assert!(
+            matches!(&mapped, PortError::Remote(reason) if reason.contains("503")),
+            "got {mapped:?}"
+        );
+    }
+
+    #[test]
+    fn a_transport_failure_keeps_its_cause_chain() {
+        // Given a transport error wrapping an inner cause.
+        #[derive(Debug)]
+        struct Cause;
+        impl std::fmt::Display for Cause {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("certificate expired")
+            }
+        }
+        impl std::error::Error for Cause {}
+
+        #[derive(Debug)]
+        struct Outer(Cause);
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("error sending request")
+            }
+        }
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        // When rendered with the chain.
+        let rendered = describe(&Outer(Cause));
+
+        // Then both the outer message and the cause appear, so a timeout can be
+        // told from a TLS rejection in an environment with no backtrace.
+        assert!(rendered.contains("error sending request"));
+        assert!(rendered.contains("certificate expired"));
     }
 }

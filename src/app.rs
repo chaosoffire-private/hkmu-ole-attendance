@@ -89,13 +89,9 @@ impl App {
             sleep(wait).await;
 
             if let Err(error) = self.run_setup_cycle(&notifier).await {
-                error!(%error, "daily setup failed");
-                notifier
-                    .notify(
-                        Notice::Error,
-                        &format!("**Daily Setup Error**\nError: {error}"),
-                    )
-                    .await;
+                // `daily_setup` has already notified and logged the failure, so
+                // this only records that the run as a whole did not complete.
+                warn!(%error, "daily setup failed; the daily timer will retry");
             }
         }
     }

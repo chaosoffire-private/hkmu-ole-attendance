@@ -21,7 +21,7 @@ use jiff::{Timestamp, Zoned};
 
 use crate::domain::attendance::Submission;
 use crate::domain::geo::Coordinates;
-use crate::domain::schedule::{ScheduledClass, TodayClassResponse};
+use crate::domain::schedule::{Outcome, ScheduledClass, Timetable};
 use crate::port::error::PortError;
 use crate::port::gateway::ActivityState;
 use crate::port::{
@@ -209,13 +209,13 @@ fn exhausted() -> PortError {
 /// A schedule gateway that replays a scripted sequence of results.
 #[derive(Debug)]
 pub struct ScriptedScheduleGateway {
-    results: Mutex<VecDeque<Result<TodayClassResponse, PortError>>>,
+    results: Mutex<VecDeque<Result<Timetable, PortError>>>,
     calls: Mutex<u32>,
 }
 
 impl ScriptedScheduleGateway {
     /// Serve each result in turn.
-    pub fn new(results: Vec<Result<TodayClassResponse, PortError>>) -> Self {
+    pub fn new(results: Vec<Result<Timetable, PortError>>) -> Self {
         Self {
             results: Mutex::new(results.into()),
             calls: Mutex::new(0),
@@ -231,7 +231,7 @@ impl ScriptedScheduleGateway {
 impl ScheduleGateway for ScriptedScheduleGateway {
     fn today_classes(
         &self,
-    ) -> impl std::future::Future<Output = Result<TodayClassResponse, PortError>> + Send {
+    ) -> impl std::future::Future<Output = Result<Timetable, PortError>> + Send {
         *self.calls.lock().expect("gateway lock") += 1;
         let next = self
             .results
@@ -243,23 +243,21 @@ impl ScheduleGateway for ScriptedScheduleGateway {
     }
 }
 
-/// A payload carrying the success result and no courses.
-pub fn successful_payload() -> TodayClassResponse {
-    TodayClassResponse {
-        result: crate::domain::schedule::ApiResult::Number(1),
-        classes: Vec::new(),
-        error: None,
-        errormsg: None,
+/// A timetable carrying the success outcome and no courses.
+pub fn successful_timetable() -> Timetable {
+    Timetable {
+        outcome: Outcome::Success,
+        courses: Vec::new(),
     }
 }
 
-/// A payload carrying the API's rejection, as an unusable session produces.
-pub fn rejected_payload() -> TodayClassResponse {
-    TodayClassResponse {
-        result: crate::domain::schedule::ApiResult::Text("-1".to_owned()),
-        classes: Vec::new(),
-        error: Some("9901".to_owned()),
-        errormsg: Some("The API is only for web users.".to_owned()),
+/// A timetable carrying the service's rejection, as an unusable session produces.
+pub fn rejected_timetable() -> Timetable {
+    Timetable {
+        outcome: Outcome::Rejected {
+            reason: Some("9901: The API is only for web users.".to_owned()),
+        },
+        courses: Vec::new(),
     }
 }
 

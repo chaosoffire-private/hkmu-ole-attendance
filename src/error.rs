@@ -33,6 +33,18 @@ pub enum AppError {
     #[error("session expired or was revoked: {0}")]
     SessionExpired(String),
 
+    /// The server answered with a non-success HTTP status.
+    ///
+    /// Carried as its own variant so a 5xx is not mistaken for a page whose
+    /// layout changed, which would send an operator to the wrong subsystem.
+    #[error("HTTP {status} from {url}")]
+    HttpStatus {
+        /// The response status code.
+        status: u16,
+        /// The URL that was requested.
+        url: String,
+    },
+
     /// Transport-level failure.
     #[error(transparent)]
     Http(#[from] reqwest::Error),

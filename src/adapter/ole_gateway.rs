@@ -7,7 +7,7 @@ use tracing::{debug, warn};
 
 use crate::domain::attendance::Submission;
 use crate::domain::geo::Coordinates;
-use crate::domain::schedule::{ScheduledClass, TodayClassResponse};
+use crate::domain::schedule::{ScheduledClass, Timetable};
 use crate::infra::oleconnect::{Activity, OleClient};
 use crate::infra::session_cache::SessionCache;
 use crate::port::error::PortError;
@@ -38,7 +38,7 @@ impl OleScheduleGateway {
 }
 
 impl ScheduleGateway for OleScheduleGateway {
-    async fn today_classes(&self) -> Result<TodayClassResponse, PortError> {
+    async fn today_classes(&self) -> Result<Timetable, PortError> {
         let session = self.cache.session().await?;
         let mut client = OleClient::new(session, self.api_url.clone());
         let payload = client.fetch_today_classes().await?;

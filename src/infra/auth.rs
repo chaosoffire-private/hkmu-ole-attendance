@@ -209,12 +209,13 @@ impl Authenticator {
 
     /// Confirm the session can call the class API.
     async fn validate(&self, session: &mut HttpSession) -> Result<bool> {
-        let payload: crate::domain::schedule::TodayClassResponse =
+        let payload: super::wire::WireResponse =
             session.get_json(&self.config.oleconnect_api_url).await?;
-        if payload.is_success() {
+        let timetable = crate::domain::schedule::Timetable::from(payload);
+        if timetable.is_success() {
             return Ok(true);
         }
-        if let Some(summary) = payload.error_summary() {
+        if let Some(summary) = timetable.error_summary() {
             debug!(error = %summary, "OLE API rejected the session");
         }
         Ok(false)

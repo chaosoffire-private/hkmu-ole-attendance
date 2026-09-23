@@ -41,22 +41,29 @@ pub enum Submission {
 impl Submission {
     /// Classify a raw submission response body.
     ///
-    /// Mirrors the page's own test: it ticks its checkmark when the body
-    /// contains `present` or `active`, and shows a closed error when it
-    /// contains `submission closed`. The `success` token is only the response
-    /// envelope (`success|<datetime>|<status>|...`) and is *not* a success
-    /// test, so `success|...|Absent|...` must not be reported as confirmed.
+    /// The server answers either with a bare status or with an envelope of the
+    /// form `success|<datetime>|<status>|...`, so the status is matched as a
+    /// whole field. Substring matching must not be used here: `contains("active")`
+    /// also matches "inactive" and `contains("present")` also matches
+    /// "represent", and either would report attendance that was never recorded —
+    /// the one failure this program must never make, since a confirmation stops
+    /// polling and tells the operator the class is safe.
+    ///
+    /// The `success` token is only the envelope marker, not a success test, so
+    /// `success|...|Absent|...` must not be read as confirmed.
     pub fn classify(body: &str) -> Self {
         const CLOSED: &str = "submission closed";
-        const PRESENT: &str = "present";
-        const ACTIVE: &str = "active";
         const ENVELOPE: &str = "success";
 
         let lower = body.to_ascii_lowercase();
+        // Closed wins outright: a late poll must never read as a confirmation.
         if lower.contains(CLOSED) {
             return Self::Closed;
         }
-        if lower.contains(PRESENT) || lower.contains(ACTIVE) {
+        // Either the envelope's status field, or a bare status body.
+        let recorded =
+            status_field(&lower).is_some_and(is_recorded_status) || is_recorded_status(&lower);
+        if recorded {
             return Self::Confirmed;
         }
         if lower.contains(ENVELOPE) || lower.contains('|') {
@@ -69,6 +76,20 @@ impl Submission {
     pub const fn is_confirmed(&self) -> bool {
         matches!(self, Self::Confirmed)
     }
+}
+
+/// The `<status>` field of a `success|<datetime>|<status>|...` envelope.
+fn status_field(lower: &str) -> Option<&str> {
+    let mut fields = lower.split('|');
+    let _envelope = fields.next()?;
+    let _datetime = fields.next()?;
+    fields.next().map(str::trim)
+}
+
+/// Whether a whole status token means attendance was recorded.
+fn is_recorded_status(token: &str) -> bool {
+    let token = token.trim();
+    token == "present" || token == "active"
 }
 
 impl std::fmt::Display for Submission {
@@ -246,6 +267,30 @@ mod tests {
         // absent would silently lose a class.
         assert!(!outcome.is_confirmed());
         assert_eq!(outcome, Submission::NotYet);
+    }
+
+    #[test]
+    fn does_not_read_a_word_containing_a_status_token_as_confirmation() {
+        // Given bodies that contain "present" or "active" only as part of a
+        // longer word, as a revoked-session page does.
+        let inactive = Submission::classify("Your session is inactive, please log in again");
+        let represent = Submission::classify("This is not representative of attendance");
+
+        // When classified.
+        // Then neither is confirmed. Reporting these as confirmed would stop
+        // polling and tell the operator a class was safe when it was not.
+        assert!(!inactive.is_confirmed(), "got {inactive:?}");
+        assert!(!represent.is_confirmed(), "got {represent:?}");
+    }
+
+    #[test]
+    fn does_not_read_a_bare_substring_of_a_status_field_as_confirmation() {
+        // Given an envelope whose status field merely contains a token.
+        // When classified.
+        // Then it is not confirmed, because the field must match as a whole.
+        assert!(!Submission::classify("success|2026-09-21 09:03|Inactive|btn1").is_confirmed());
+        assert!(!Submission::classify("success|2026-09-21 09:03|NotPresent|btn1").is_confirmed());
+        assert!(!Submission::classify("success|2026-09-21 09:03||btn1").is_confirmed());
     }
 
     #[test]

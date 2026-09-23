@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use reqwest::{Client, Method, Response, redirect};
 use serde::de::DeserializeOwned;
-use tracing::{debug, warn};
+use tracing::debug;
 use url::Url;
 
 use super::cookie::CookieStore;
@@ -12,6 +12,15 @@ use crate::error::{AppError, Result};
 
 /// A browser-like User-Agent; the OLE front ends reject some default clients.
 pub const USER_AGENT: &str = "Mozilla/5.0 (Linux; Android 16; Pixel 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36";
+
+/// The only hosts this client will follow a redirect to.
+///
+/// The login chain is entirely within the university, and a redirect target
+/// comes from server-supplied HTML, so following it anywhere else would let a
+/// compromised page or a hostile intermediary point the client at its own host.
+/// The SSO flow is observed to use exactly these (iole, auth, authapp,
+/// oleconnect), and all share the parent domain.
+const ALLOWED_REDIRECT_SUFFIX: &str = ".hkmu.edu.hk";
 
 const MAX_REDIRECTS: usize = 12;
 const TIMEOUT_SECS: u64 = 30;
@@ -133,6 +142,11 @@ impl HttpSession {
 
             if status.is_redirection() {
                 next = redirect_target(&parsed, &response)?;
+                if !is_allowed_host(&next) {
+                    return Err(AppError::Auth(format!(
+                        "{url} redirected off the university domain, to {next}"
+                    )));
+                }
                 current_method = Method::GET;
                 debug!(%status, target = %next, "following redirect");
                 continue;
@@ -140,7 +154,11 @@ impl HttpSession {
 
             let body = response.text().await.map_err(AppError::Http)?;
             if !status.is_success() {
-                warn!(%status, url = %parsed, bytes = body.len(), "non-success response");
+                debug!(%status, url = %parsed, bytes = body.len(), "non-success response");
+                return Err(AppError::HttpStatus {
+                    status: status.as_u16(),
+                    url: parsed.to_string(),
+                });
             }
             return Ok(body);
         }
@@ -162,10 +180,47 @@ fn redirect_target(base: &Url, response: &Response) -> Result<String> {
     Ok(base.join(location)?.to_string())
 }
 
+/// Whether a redirect target stays within the allowed university hosts.
+fn is_allowed_host(target: &str) -> bool {
+    Url::parse(target)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .is_some_and(|host| {
+            let host = host.to_ascii_lowercase();
+            host.ends_with(ALLOWED_REDIRECT_SUFFIX)
+                || host == ALLOWED_REDIRECT_SUFFIX.trim_start_matches('.')
+        })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::HttpSession;
+    use super::{HttpSession, is_allowed_host};
     use crate::infra::cookie::Cookie;
+
+    #[test]
+    fn allows_redirects_within_the_university() {
+        // Given the hosts the login chain actually uses.
+        // When checked against the allow-list.
+        // Then each is permitted.
+        for host in [
+            "https://iole.hkmu.edu.hk/x",
+            "https://auth.hkmu.edu.hk/nidp/idff/sso",
+            "https://authapp.hkmu.edu.hk/nesp/app/plogin",
+            "https://oleconnect.hkmu.edu.hk/oledb/api/x",
+        ] {
+            assert!(is_allowed_host(host), "{host} should be allowed");
+        }
+    }
+
+    #[test]
+    fn refuses_a_redirect_off_the_university_domain() {
+        // Given targets that are external or merely share the domain's letters.
+        // When checked.
+        // Then each is refused, so a hostile response cannot redirect us.
+        assert!(!is_allowed_host("https://evil.example/x"));
+        assert!(!is_allowed_host("https://evilhkmu.edu.hk/x"));
+        assert!(!is_allowed_host("https://discord.com/api/webhooks/1"));
+    }
 
     #[tokio::test]
     async fn cookies_are_scoped_to_the_university_domain() {

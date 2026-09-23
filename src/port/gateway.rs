@@ -3,14 +3,14 @@
 use super::error::PortError;
 use crate::domain::attendance::Submission;
 use crate::domain::geo::Coordinates;
-use crate::domain::schedule::{ScheduledClass, TodayClassResponse};
+use crate::domain::schedule::{ScheduledClass, Timetable};
 
 /// Reads the day's timetable from the remote service.
 pub trait ScheduleGateway: Send + Sync {
     /// Retrieve the timetable the service currently reports.
     fn today_classes(
         &self,
-    ) -> impl std::future::Future<Output = Result<TodayClassResponse, PortError>> + Send;
+    ) -> impl std::future::Future<Output = Result<Timetable, PortError>> + Send;
 }
 
 /// What a read-only probe found on a class's activities page.
