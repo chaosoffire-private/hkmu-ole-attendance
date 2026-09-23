@@ -20,6 +20,6 @@ pub use error::PortError;
 
 /// Convenience alias for fallible port operations.
 pub type Result<T> = std::result::Result<T, PortError>;
-pub use gateway::{ActivityReport, AttendanceGateway, ScheduleGateway};
+pub use gateway::{ActivityState, AttendanceGateway, ScheduleGateway};
 pub use notifier::{Notice, Notifier};
 pub use session::SessionInvalidator;

@@ -244,6 +244,8 @@ mod tests {
             attendance_poll_interval: std::time::Duration::from_secs(600),
             warning_threshold: std::time::Duration::from_secs(1800),
             default_class_duration: std::time::Duration::from_secs(10800),
+            setup_retry_attempts: 3,
+            setup_retry_delay: std::time::Duration::from_secs(30),
         }
     }
 

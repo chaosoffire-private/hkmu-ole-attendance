@@ -21,9 +21,11 @@ use crate::domain::schedule::ScheduledClass;
 use crate::domain::time::duration_until_next;
 use crate::infra::session_cache::SessionCache;
 use crate::port::{
-    ActivityReport, AttendanceGateway, Clock, Notice, Notifier, PortError, Result as PortResult,
+    ActivityState, AttendanceGateway, Clock, Notice, Notifier, PortError, Result as PortResult,
 };
-use crate::usecase::{AttendanceOutcome, PollParts, SetupOutcome, daily_setup, mark_attendance};
+use crate::usecase::{
+    AttendanceOutcome, PollParts, RetryPolicy, SetupOutcome, daily_setup, mark_attendance,
+};
 
 /// Where a one-shot report is delivered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +120,7 @@ impl App {
             notifier,
             &self.invalidator(),
             &self.config.timezone,
+            self.retry_policy(),
         )
         .await?;
         Ok(())
@@ -132,15 +135,16 @@ impl App {
     /// Returns an error when the timetable cannot be fetched or is unusable.
     pub async fn probe(&self) -> PortResult<()> {
         let clock = SystemClock;
-        let session = self.invalidator();
+        let invalidator = self.invalidator();
         let notifier = LogNotifier;
 
         let outcome = daily_setup(
             &clock,
             &self.schedule_gateway(),
             &notifier,
-            &session,
+            &invalidator,
             &self.config.timezone,
+            self.retry_policy(),
         )
         .await?;
         let SetupOutcome::Ready(schedule) = outcome else {
@@ -156,7 +160,17 @@ impl App {
 
         let gateway = self.attendance_gateway();
         for class in &schedule.classes {
-            report_probe(&notifier, class, gateway.probe(class).await).await;
+            match gateway.probe(class).await {
+                Ok(state) => report_probe(&notifier, class, state).await,
+                Err(error) => {
+                    notifier
+                        .notify(
+                            Notice::Error,
+                            &format!("{} | probe failed: {error}", class.course_code),
+                        )
+                        .await;
+                }
+            }
         }
         Ok(())
     }
@@ -172,6 +186,7 @@ impl App {
             notifier.as_ref(),
             &self.invalidator(),
             &self.config.timezone,
+            self.retry_policy(),
         )
         .await?;
 
@@ -194,7 +209,7 @@ impl App {
             let config = Arc::clone(&self.config);
             let notifier = Arc::clone(notifier);
             let gateway = self.attendance_gateway();
-            let session = self.invalidator();
+            let invalidator = self.invalidator();
             let coordinates = self.coordinates;
             set.spawn(async move {
                 let clock = SystemClock;
@@ -203,7 +218,7 @@ impl App {
                         clock: &clock,
                         gateway: &gateway,
                         notifier: notifier.as_ref(),
-                        session: &session,
+                        invalidator: &invalidator,
                         coordinates,
                         zone: &config.timezone,
                         poll_interval: config.attendance_poll_interval,
@@ -227,6 +242,14 @@ impl App {
                 }
                 Err(join_error) => error!(?join_error, "attendance task was cancelled"),
             }
+        }
+    }
+
+    /// The retry policy the configured timetable fetch runs with.
+    fn retry_policy(&self) -> RetryPolicy {
+        RetryPolicy {
+            attempts: self.config.setup_retry_attempts,
+            delay: self.config.setup_retry_delay,
         }
     }
 
@@ -261,30 +284,22 @@ impl App {
 }
 
 /// Report one probe result at the severity it deserves.
-async fn report_probe<N: Notifier>(
-    notifier: &N,
-    class: &ScheduledClass,
-    result: PortResult<ActivityReport>,
-) {
-    let (level, message) = match result {
-        Ok(report) if report.found && report.open => (
+async fn report_probe<N: Notifier>(notifier: &N, class: &ScheduledClass, state: ActivityState) {
+    let (level, message) = match state {
+        ActivityState::Open => (
             Notice::Info,
             format!("{} | attendance activity is open", class.course_code),
         ),
-        Ok(report) if report.found => (
+        ActivityState::Closed => (
             Notice::Warning,
             format!(
                 "{} | attendance activity found but its window is closed",
                 class.course_code
             ),
         ),
-        Ok(_) => (
+        ActivityState::Absent => (
             Notice::Warning,
             format!("{} | no attendance activity found", class.course_code),
-        ),
-        Err(error) => (
-            Notice::Error,
-            format!("{} | probe failed: {error}", class.course_code),
         ),
     };
     notifier.notify(level, &message).await;

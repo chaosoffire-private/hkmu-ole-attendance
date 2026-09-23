@@ -130,12 +130,10 @@ impl ClassWindow {
 
 /// Decide what the poller should do now.
 ///
-/// `confirmed` short-circuits everything: once attendance is recorded there is
-/// nothing left to do, regardless of the clock.
-pub fn next_action(window: &ClassWindow, now: jiff::Timestamp, confirmed: bool) -> Action {
-    if confirmed {
-        return Action::Finished;
-    }
+/// This is the single place the poll loop consults: `Finished` covers the class
+/// having ended, so the caller does not re-test the window and risk disagreeing
+/// with this decision.
+pub fn next_action(window: &ClassWindow, now: jiff::Timestamp) -> Action {
     if window.is_over(now) {
         return Action::Finished;
     }
@@ -164,32 +162,12 @@ pub fn should_warn(
 }
 
 /// Render the "nearly over" warning body.
-pub fn warning_message(
-    class: &ScheduledClass,
-    minutes_remaining: i64,
-    attempt: u32,
-    had_error: bool,
-) -> String {
+pub fn warning_message(class: &ScheduledClass, minutes_remaining: i64, attempt: u32) -> String {
     let attempts = attempt.saturating_add(1);
-    let mut message = String::from("**- ATTENDANCE WARNING**\n");
-    message.push_str("> Course: ");
-    message.push_str(&class.course_code);
-    message.push_str("\n> Class: ");
-    message.push_str(&class.name);
-    message.push_str("\n> Only ");
-    message.push_str(&minutes_remaining.to_string());
-    message.push_str(" minutes remaining!\n");
-    message.push_str(if had_error {
-        "ERROR occurred during attempt "
-    } else {
-        "> Attempts so far: "
-    });
-    message.push_str(&attempts.to_string());
-    if had_error {
-        message.push_str("\nTotal attempts: ");
-        message.push_str(&attempts.to_string());
-    }
-    message
+    format!(
+        "**- ATTENDANCE WARNING**\n> Course: {}\n> Class: {}\n> Only {minutes_remaining} minutes remaining!\n> Attempts so far: {attempts}",
+        class.course_code, class.name
+    )
 }
 
 /// Render the confirmation body.
@@ -310,7 +288,7 @@ mod tests {
         // When the next action is decided.
         // Then the poller waits exactly one hour.
         assert_eq!(
-            next_action(&window(), now, false),
+            next_action(&window(), now),
             Action::Wait(Duration::from_secs(3600))
         );
     }
@@ -322,7 +300,7 @@ mod tests {
 
         // When the next action is decided.
         // Then it polls immediately.
-        assert_eq!(next_action(&window(), now, false), Action::Poll);
+        assert_eq!(next_action(&window(), now), Action::Poll);
     }
 
     #[test]
@@ -332,18 +310,7 @@ mod tests {
 
         // When the next action is decided.
         // Then polling stops.
-        assert_eq!(next_action(&window(), now, false), Action::Finished);
-    }
-
-    #[test]
-    fn confirmation_short_circuits_even_mid_class() {
-        // Given a running class and confirmed attendance.
-        let now = hkt("2026-09-21T11:30:00+08:00").timestamp();
-
-        // When the next action is decided.
-        // Then it finishes immediately rather than polling again, which is what
-        // prevents a stray failure notification after a late success.
-        assert_eq!(next_action(&window(), now, true), Action::Finished);
+        assert_eq!(next_action(&window(), now), Action::Finished);
     }
 
     #[test]
@@ -403,17 +370,15 @@ mod tests {
     }
 
     #[test]
-    fn renders_the_warning_with_and_without_an_error() {
-        // Given a warning with no error and one after an error.
-        let clean = warning_message(&class(), 20, 2, false);
-        let errored = warning_message(&class(), 20, 2, true);
+    fn renders_the_warning_body() {
+        // Given a class and the third attempt about to be made.
+        let warning = warning_message(&class(), 20, 2);
 
-        // Then each carries the attempt count, and only the error form mentions
-        // the total, matching the documented notification format.
-        assert!(clean.contains("> Attempts so far: 3"));
-        assert!(!clean.contains("Total attempts"));
-        assert!(errored.contains("ERROR occurred during attempt 3"));
-        assert!(errored.contains("Total attempts: 3"));
+        // Then it names the class, the remaining time and the attempt count.
+        assert!(warning.starts_with("**- ATTENDANCE WARNING**"));
+        assert!(warning.contains("> Course: ELEC3050SEF"));
+        assert!(warning.contains("> Only 20 minutes remaining!"));
+        assert!(warning.contains("> Attempts so far: 3"));
     }
 
     #[test]

@@ -66,7 +66,10 @@ async fn post_to_webhook(webhook: &str, message: &str) -> Result<(), String> {
         .json(&serde_json::json!({ "content": message }))
         .send()
         .await
-        .map_err(|error| error.to_string())?;
+        // The webhook URL *is* the credential, and reqwest embeds the request
+        // URL in its error `Display`; `without_url` strips it so a delivery
+        // failure cannot write the token into the log.
+        .map_err(|error| error.without_url().to_string())?;
 
     let status = response.status();
     if status.is_success() {

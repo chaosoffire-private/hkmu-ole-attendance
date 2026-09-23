@@ -17,6 +17,10 @@ pub const DEFAULT_OLECONNECT_API_URL: &str =
 pub const DEFAULT_TIMEZONE: &str = "Asia/Hong_Kong";
 /// Default daily setup time (HKT), matching the historical Python behaviour.
 pub const DEFAULT_SCHEDULE_TIME: &str = "03:00";
+/// Attempts made to retrieve a usable timetable before deferring to the next run.
+pub const DEFAULT_SETUP_RETRY_ATTEMPTS: u32 = 3;
+/// Delay between those timetable-retrieval attempts.
+pub const DEFAULT_SETUP_RETRY_DELAY_SECS: u64 = 30;
 
 /// How the client authenticates against OLE.
 #[derive(Debug, Clone)]
@@ -67,6 +71,11 @@ pub struct Config {
     pub warning_threshold: std::time::Duration,
     /// Assumed class length when the API omits an end time.
     pub default_class_duration: std::time::Duration,
+    /// Attempts made to retrieve a usable timetable before giving up until the
+    /// next scheduled run.
+    pub setup_retry_attempts: u32,
+    /// Delay between those retrieval attempts.
+    pub setup_retry_delay: std::time::Duration,
 }
 
 /// Read an environment variable, treating blank values as unset.
@@ -80,6 +89,39 @@ fn env_opt(key: &str) -> Option<String> {
 /// Read an environment variable with a fallback default.
 fn env_or(key: &str, default: &str) -> String {
     env_opt(key).unwrap_or_else(|| default.to_owned())
+}
+
+/// Parse a positive integer, naming `key` in any error.
+fn parse_count(key: &str, raw: &str) -> Result<u32> {
+    match raw.parse::<u32>() {
+        Ok(value) if value >= 1 => Ok(value),
+        _ => Err(AppError::Config(format!(
+            "{key} must be a positive integer, got {raw:?}"
+        ))),
+    }
+}
+
+/// Parse a positive number of seconds into a duration, naming `key` in errors.
+fn parse_secs(key: &str, raw: &str) -> Result<std::time::Duration> {
+    match raw.parse::<u64>() {
+        Ok(value) if value >= 1 => Ok(std::time::Duration::from_secs(value)),
+        _ => Err(AppError::Config(format!(
+            "{key} must be a positive number of seconds, got {raw:?}"
+        ))),
+    }
+}
+
+/// Read an environment variable as a positive integer, or fall back to `default`.
+fn env_count(key: &str, default: u32) -> Result<u32> {
+    env_opt(key).map_or_else(|| Ok(default), |raw| parse_count(key, &raw))
+}
+
+/// Read an environment variable as a positive number of seconds.
+fn env_secs(key: &str, default: u64) -> Result<std::time::Duration> {
+    env_opt(key).map_or_else(
+        || Ok(std::time::Duration::from_secs(default)),
+        |raw| parse_secs(key, &raw),
+    )
 }
 
 impl Config {
@@ -136,6 +178,8 @@ impl Config {
             attendance_poll_interval: std::time::Duration::from_secs(600),
             warning_threshold: std::time::Duration::from_secs(30 * 60),
             default_class_duration: std::time::Duration::from_secs(3 * 60 * 60),
+            setup_retry_attempts: env_count("SETUP_RETRY_ATTEMPTS", DEFAULT_SETUP_RETRY_ATTEMPTS)?,
+            setup_retry_delay: env_secs("SETUP_RETRY_DELAY_SECS", DEFAULT_SETUP_RETRY_DELAY_SECS)?,
         })
     }
 }
@@ -144,7 +188,7 @@ impl Config {
 mod tests {
     use jiff::tz::TimeZone;
 
-    use super::{DEFAULT_TIMEZONE, TimeOfDay};
+    use super::{DEFAULT_TIMEZONE, TimeOfDay, parse_count, parse_secs};
 
     #[test]
     fn parses_zero_padded_time() {
@@ -197,5 +241,42 @@ mod tests {
         // When looked up in the tz database.
         // Then it resolves, so the default can never be invalid.
         assert!(TimeZone::get(DEFAULT_TIMEZONE).is_ok());
+    }
+
+    #[test]
+    fn parses_a_positive_retry_count() {
+        // Given a positive integer.
+        // When parsed as a count.
+        // Then it is accepted verbatim.
+        assert_eq!(parse_count("SETUP_RETRY_ATTEMPTS", "5").expect("valid"), 5);
+    }
+
+    #[test]
+    fn rejects_a_zero_or_malformed_retry_count() {
+        // Given values that would mean "never fetch" or are not numbers.
+        // When parsed as a count.
+        // Then each is rejected rather than silently disabling retrieval.
+        assert!(parse_count("SETUP_RETRY_ATTEMPTS", "0").is_err());
+        assert!(parse_count("SETUP_RETRY_ATTEMPTS", "many").is_err());
+        assert!(parse_count("SETUP_RETRY_ATTEMPTS", "-1").is_err());
+    }
+
+    #[test]
+    fn parses_a_positive_retry_delay() {
+        // Given a positive number of seconds.
+        // When parsed as a delay.
+        // Then it becomes that many seconds exactly.
+        assert_eq!(
+            parse_secs("SETUP_RETRY_DELAY_SECS", "45").expect("valid"),
+            std::time::Duration::from_secs(45)
+        );
+    }
+
+    #[test]
+    fn rejects_a_zero_retry_delay() {
+        // Given a zero delay, which would retry with no pause.
+        // When parsed.
+        // Then it is rejected rather than busy-looping the endpoint.
+        assert!(parse_secs("SETUP_RETRY_DELAY_SECS", "0").is_err());
     }
 }

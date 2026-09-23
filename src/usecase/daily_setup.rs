@@ -8,10 +8,14 @@ use crate::domain::schedule::{DaySchedule, format_classes_message, select_day};
 use crate::port::session::SessionInvalidator;
 use crate::port::{Clock, Notice, Notifier, PortError, ScheduleGateway};
 
-/// Attempts made to retrieve a usable timetable.
-pub const FETCH_ATTEMPTS: u32 = 3;
-/// Delay between retrieval attempts.
-pub const FETCH_RETRY_DELAY: Duration = Duration::from_secs(30);
+/// How hard to try retrieving a timetable before deferring to the next run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    /// Attempts made to retrieve a usable timetable.
+    pub attempts: u32,
+    /// Delay between those attempts.
+    pub delay: Duration,
+}
 
 /// What a daily setup produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,21 +32,22 @@ pub enum SetupOutcome {
 /// Retrieve today's timetable and report it.
 ///
 /// The day is taken from `clock`, so the flow is testable at any imagined time.
-#[instrument(skip(clock, gateway, notifier, session))]
-pub async fn daily_setup<C, G, N, S>(
+#[instrument(skip(clock, gateway, notifier, invalidator, retry))]
+pub async fn daily_setup<C, G, N, I>(
     clock: &C,
     gateway: &G,
     notifier: &N,
-    session: &S,
+    invalidator: &I,
     zone: &jiff::tz::TimeZone,
+    retry: RetryPolicy,
 ) -> Result<SetupOutcome, PortError>
 where
     C: Clock,
     G: ScheduleGateway,
     N: Notifier,
-    S: SessionInvalidator,
+    I: SessionInvalidator,
 {
-    let payload = match fetch_with_retries(gateway, session).await {
+    let payload = match fetch_with_retries(gateway, invalidator, retry).await {
         Ok(payload) => payload,
         Err(error) => {
             let message = format!(
@@ -73,20 +78,21 @@ where
 }
 
 /// Fetch the timetable, retrying until a successful payload arrives.
-async fn fetch_with_retries<G, S>(
+async fn fetch_with_retries<G, I>(
     gateway: &G,
-    session: &S,
+    invalidator: &I,
+    retry: RetryPolicy,
 ) -> Result<crate::domain::schedule::TodayClassResponse, PortError>
 where
     G: ScheduleGateway,
-    S: SessionInvalidator,
+    I: SessionInvalidator,
 {
     let mut last_error: Option<PortError> = None;
 
-    for attempt in 1..=FETCH_ATTEMPTS {
+    for attempt in 1..=retry.attempts {
         info!(
             attempt,
-            attempts = FETCH_ATTEMPTS,
+            attempts = retry.attempts,
             "retrieving today's classes"
         );
         match gateway.today_classes().await {
@@ -99,7 +105,7 @@ where
                 // An unsuccessful payload is this API's way of saying the
                 // session is not usable — the same test `validate` applies — so
                 // drop it and let the next attempt log in afresh.
-                session.invalidate().await;
+                invalidator.invalidate().await;
                 last_error = Some(PortError::Remote(reason));
             }
             Err(error) => {
@@ -107,13 +113,13 @@ where
                 // Only a rejected session justifies a fresh login; a transport
                 // blip must not throw away a session that still works.
                 if error.is_session_failure() {
-                    session.invalidate().await;
+                    invalidator.invalidate().await;
                 }
                 last_error = Some(error);
             }
         }
-        if attempt < FETCH_ATTEMPTS {
-            tokio::time::sleep(FETCH_RETRY_DELAY).await;
+        if attempt < retry.attempts {
+            tokio::time::sleep(retry.delay).await;
         }
     }
 
@@ -122,7 +128,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{FETCH_ATTEMPTS, SetupOutcome, daily_setup};
+    use super::{RetryPolicy, SetupOutcome, daily_setup};
     use crate::port::Notice;
     use crate::port::error::PortError;
     use crate::usecase::test_doubles::{
@@ -134,20 +140,29 @@ mod tests {
         jiff::tz::TimeZone::get("Asia/Hong_Kong").expect("valid tz")
     }
 
+    /// Three attempts, matching the default the binary configures.
+    fn policy() -> RetryPolicy {
+        RetryPolicy {
+            attempts: 3,
+            delay: std::time::Duration::from_secs(30),
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_successful_payload_flows_straight_through() {
         // Given a service that answers successfully on the first attempt.
         let gateway = ScriptedScheduleGateway::new(vec![Ok(successful_payload())]);
         let notifier = RecordingNotifier::default();
-        let session = FakeSessionInvalidator::default();
+        let invalidator = FakeSessionInvalidator::default();
 
         // When the daily setup runs.
         let outcome = daily_setup(
             &FakeClock::at(hkt("2026-09-21T03:00:00+08:00")),
             &gateway,
             &notifier,
-            &session,
+            &invalidator,
             &zone(),
+            policy(),
         )
         .await
         .expect("setup succeeds");
@@ -156,7 +171,7 @@ mod tests {
         // and it did not discard a session that was working.
         assert!(matches!(outcome, SetupOutcome::Ready(_)));
         assert_eq!(gateway.call_count(), 1);
-        assert_eq!(session.invalidations(), 0);
+        assert_eq!(invalidator.invalidations(), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -166,15 +181,16 @@ mod tests {
         let gateway =
             ScriptedScheduleGateway::new(vec![Ok(rejected_payload()), Ok(successful_payload())]);
         let notifier = RecordingNotifier::default();
-        let session = FakeSessionInvalidator::default();
+        let invalidator = FakeSessionInvalidator::default();
 
         // When the daily setup runs.
         let outcome = daily_setup(
             &FakeClock::at(hkt("2026-09-21T03:00:00+08:00")),
             &gateway,
             &notifier,
-            &session,
+            &invalidator,
             &zone(),
+            policy(),
         )
         .await
         .expect("setup succeeds on the retry");
@@ -183,7 +199,7 @@ mod tests {
         assert!(matches!(outcome, SetupOutcome::Ready(_)));
         assert_eq!(gateway.call_count(), 2);
         assert_eq!(
-            session.invalidations(),
+            invalidator.invalidations(),
             1,
             "an unusable payload must discard the session"
         );
@@ -198,15 +214,16 @@ mod tests {
             Ok(successful_payload()),
         ]);
         let notifier = RecordingNotifier::default();
-        let session = FakeSessionInvalidator::default();
+        let invalidator = FakeSessionInvalidator::default();
 
         // When the daily setup runs.
         let outcome = daily_setup(
             &FakeClock::at(hkt("2026-09-21T03:00:00+08:00")),
             &gateway,
             &notifier,
-            &session,
+            &invalidator,
             &zone(),
+            policy(),
         )
         .await
         .expect("setup succeeds on the retry");
@@ -216,7 +233,7 @@ mod tests {
         assert!(matches!(outcome, SetupOutcome::Ready(_)));
         assert_eq!(gateway.call_count(), 2);
         assert_eq!(
-            session.invalidations(),
+            invalidator.invalidations(),
             0,
             "a transport failure must not discard a healthy session"
         );
@@ -231,22 +248,23 @@ mod tests {
             Ok(rejected_payload()),
         ]);
         let notifier = RecordingNotifier::default();
-        let session = FakeSessionInvalidator::default();
+        let invalidator = FakeSessionInvalidator::default();
 
         // When the daily setup runs.
         let outcome = daily_setup(
             &FakeClock::at(hkt("2026-09-21T03:00:00+08:00")),
             &gateway,
             &notifier,
-            &session,
+            &invalidator,
             &zone(),
+            policy(),
         )
         .await;
 
         // Then it gave up after the configured number of attempts, reported the
         // failure to the operator, and never claimed success.
         assert!(outcome.is_err(), "no attempt produced a usable timetable");
-        assert_eq!(gateway.call_count(), FETCH_ATTEMPTS);
+        assert_eq!(gateway.call_count(), policy().attempts);
         assert!(notifier.contains("**Daily Setup Error**"));
         assert!(
             !notifier

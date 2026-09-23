@@ -13,12 +13,27 @@ pub trait ScheduleGateway: Send + Sync {
     ) -> impl std::future::Future<Output = Result<TodayClassResponse, PortError>> + Send;
 }
 
+/// What a read-only probe found on a class's activities page.
+///
+/// One value rather than a pair of flags, so the outcomes are exhaustive and
+/// mutually exclusive: an activity that is not the attendance type cannot also
+/// report an open window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityState {
+    /// The class has an attendance activity whose window is open.
+    Open,
+    /// The class has an attendance activity, but its window has closed.
+    Closed,
+    /// The page exposes an activity, but not the attendance type.
+    Absent,
+}
+
 /// Drives attendance for a class: locating the activity, then optionally
 /// recording it.
 ///
 /// A call authenticates first, reusing a cached session when possible.
 pub trait AttendanceGateway: Send + Sync {
-    /// Report whether `class` has a reachable attendance activity.
+    /// Report the state of `class`'s attendance activity.
     ///
     /// Read-only by contract: implementations must not submit attendance.
     /// Returning [`PortError::Session`] tells the caller the cached session was
@@ -26,7 +41,7 @@ pub trait AttendanceGateway: Send + Sync {
     fn probe(
         &self,
         class: &ScheduledClass,
-    ) -> impl std::future::Future<Output = Result<ActivityReport, PortError>> + Send;
+    ) -> impl std::future::Future<Output = Result<ActivityState, PortError>> + Send;
 
     /// Attempt attendance once for `class`.
     ///
@@ -37,13 +52,4 @@ pub trait AttendanceGateway: Send + Sync {
         class: &ScheduledClass,
         coordinates: Option<Coordinates>,
     ) -> impl std::future::Future<Output = Result<Submission, PortError>> + Send;
-}
-
-/// What a read-only probe found on a class's activities page.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActivityReport {
-    /// Whether an attendance-type activity exists at all.
-    pub found: bool,
-    /// Whether the located activity reports an open window.
-    pub open: bool,
 }

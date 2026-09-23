@@ -11,7 +11,7 @@ use crate::domain::schedule::{ScheduledClass, TodayClassResponse};
 use crate::infra::oleconnect::{Activity, OleClient};
 use crate::infra::session_cache::SessionCache;
 use crate::port::error::PortError;
-use crate::port::gateway::ActivityReport;
+use crate::port::gateway::ActivityState;
 use crate::port::{AttendanceGateway, ScheduleGateway, SessionInvalidator};
 
 /// The class-activities page for a course.
@@ -68,11 +68,14 @@ impl OleAttendanceGateway {
 }
 
 impl AttendanceGateway for OleAttendanceGateway {
-    async fn probe(&self, class: &ScheduledClass) -> Result<ActivityReport, PortError> {
+    async fn probe(&self, class: &ScheduledClass) -> Result<ActivityState, PortError> {
         let activity = self.locate(class).await?;
-        Ok(ActivityReport {
-            found: activity.is_attendance(),
-            open: activity.open,
+        Ok(if !activity.is_attendance() {
+            ActivityState::Absent
+        } else if activity.open {
+            ActivityState::Open
+        } else {
+            ActivityState::Closed
         })
     }
 
@@ -149,7 +152,7 @@ impl SessionInvalidator for CacheSessionInvalidator {
 mod tests {
     use super::activities_url;
     use crate::domain::schedule::ScheduledClass;
-    use crate::port::gateway::ActivityReport;
+    use crate::port::gateway::ActivityState;
 
     fn class() -> ScheduledClass {
         ScheduledClass {
@@ -175,25 +178,17 @@ mod tests {
     }
 
     #[test]
-    fn the_activity_report_distinguishes_found_from_open() {
-        // Given the three states a probe can observe.
-        let open = ActivityReport {
-            found: true,
-            open: true,
-        };
-        let closed = ActivityReport {
-            found: true,
-            open: false,
-        };
-        let absent = ActivityReport {
-            found: false,
-            open: false,
-        };
+    fn the_activity_state_distinguishes_absent_closed_and_open() {
+        // Given the three outcomes a probe can report.
+        let open = ActivityState::Open;
+        let closed = ActivityState::Closed;
+        let absent = ActivityState::Absent;
 
         // When compared.
         // Then each is distinct, so the operator can tell "no activity" from
         // "activity exists but its window has closed".
         assert_ne!(open, closed);
         assert_ne!(closed, absent);
+        assert_ne!(open, absent);
     }
 }

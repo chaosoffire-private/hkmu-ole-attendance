@@ -1,7 +1,7 @@
 //! Drive one class's attendance to a conclusion.
 //!
 //! The policy lives in [`crate::domain::attendance`]; this module only supplies
-//! it with reality — the clock, the gateway, the notifier and the session. Each
+//! it with reality — the clock, the gateway, the notifier and the invalidator. Each
 //! decision is delegated, so the flow stays short and the rules stay testable
 //! on their own.
 
@@ -33,11 +33,11 @@ pub enum AttendanceOutcome {
 }
 
 /// Everything one poll needs, so the helpers below stay short.
-struct Poll<'a, C, G, N, S> {
+struct Poll<'a, C, G, N, I> {
     clock: &'a C,
     gateway: &'a G,
     notifier: &'a N,
-    session: &'a S,
+    invalidator: &'a I,
     class: &'a ScheduledClass,
     window: ClassWindow,
     coordinates: Option<Coordinates>,
@@ -48,21 +48,21 @@ struct Poll<'a, C, G, N, S> {
 
 /// Poll `class` until attendance is confirmed or the class ends.
 #[instrument(skip(poll_parts), fields(course = %class.course_code))]
-pub async fn mark_attendance<C, G, N, S>(
-    poll_parts: PollParts<'_, C, G, N, S>,
+pub async fn mark_attendance<C, G, N, I>(
+    poll_parts: PollParts<'_, C, G, N, I>,
     class: &ScheduledClass,
 ) -> AttendanceOutcome
 where
     C: Clock,
     G: AttendanceGateway,
     N: Notifier,
-    S: SessionInvalidator,
+    I: SessionInvalidator,
 {
     let PollParts {
         clock,
         gateway,
         notifier,
-        session,
+        invalidator,
         coordinates,
         zone,
         poll_interval,
@@ -79,7 +79,7 @@ where
         clock,
         gateway,
         notifier,
-        session,
+        invalidator,
         class,
         window,
         coordinates,
@@ -89,14 +89,7 @@ where
     };
 
     let now = clock.timestamp();
-    if window.is_over(now) {
-        info!(
-            minutes_since_end = window.minutes_since_end(now),
-            "class already ended; skipping"
-        );
-        return AttendanceOutcome::AlreadyOver;
-    }
-    match next_action(&window, now, false) {
+    match next_action(&window, now) {
         Action::Wait(wait) => {
             info!(
                 minutes = wait.as_secs() / 60,
@@ -108,24 +101,30 @@ where
             minutes_since_start = window.minutes_since_start(now),
             "class already in progress; starting now"
         ),
-        Action::Finished => return AttendanceOutcome::AlreadyOver,
+        Action::Finished => {
+            info!(
+                minutes_since_end = window.minutes_since_end(now),
+                "class already ended; skipping"
+            );
+            return AttendanceOutcome::AlreadyOver;
+        }
     }
 
     run_loop(&poll).await
 }
 
 /// The polling loop, separated so the setup above stays readable.
-async fn run_loop<C, G, N, S>(poll: &Poll<'_, C, G, N, S>) -> AttendanceOutcome
+async fn run_loop<C, G, N, I>(poll: &Poll<'_, C, G, N, I>) -> AttendanceOutcome
 where
     C: Clock,
     G: AttendanceGateway,
     N: Notifier,
-    S: SessionInvalidator,
+    I: SessionInvalidator,
 {
     let mut attempt = 0_u32;
     let mut warning_sent = false;
 
-    while next_action(&poll.window, poll.clock.timestamp(), false) == Action::Poll {
+    while next_action(&poll.window, poll.clock.timestamp()) == Action::Poll {
         let outcome = submit_once(poll).await;
 
         if outcome.is_confirmed() {
@@ -170,7 +169,7 @@ where
         Ok(outcome) => outcome,
         Err(error) if error.is_session_failure() => {
             warn!(%error, "cached session was rejected; discarding it");
-            poll.session.invalidate().await;
+            poll.invalidator.invalidate().await;
             Submission::NotYet
         }
         Err(error) => {
@@ -201,7 +200,7 @@ where
     poll.notifier
         .notify(
             Notice::Warning,
-            &warning_message(poll.class, remaining, attempt, false),
+            &warning_message(poll.class, remaining, attempt),
         )
         .await;
     true
@@ -209,15 +208,15 @@ where
 
 /// The capabilities a poll needs, grouped so the signature stays small.
 #[derive(Debug)]
-pub struct PollParts<'a, C, G, N, S> {
+pub struct PollParts<'a, C, G, N, I> {
     /// Supplies the current instant.
     pub clock: &'a C,
     /// Drives one submission.
     pub gateway: &'a G,
     /// Delivers messages.
     pub notifier: &'a N,
-    /// Provides and invalidates the session.
-    pub session: &'a S,
+    /// Discards a session the server has rejected.
+    pub invalidator: &'a I,
     /// Coordinates submitted with attendance.
     pub coordinates: Option<Coordinates>,
     /// Zone the schedule is expressed in.
@@ -257,7 +256,7 @@ mod tests {
         let clock = FakeClock::at(hkt("2026-09-21T11:30:00+08:00"));
         let gateway = ScriptedAttendanceGateway::new(vec![Ok(Submission::Confirmed)]);
         let notifier = RecordingNotifier::default();
-        let session = FakeSessionInvalidator::default();
+        let invalidator = FakeSessionInvalidator::default();
         let class = class_from(11, 12);
 
         // When attendance is polled.
@@ -266,7 +265,7 @@ mod tests {
                 clock: &clock,
                 gateway: &gateway,
                 notifier: &notifier,
-                session: &session,
+                invalidator: &invalidator,
                 coordinates: None,
                 zone: &zone(),
                 poll_interval: FAST,
@@ -295,7 +294,7 @@ mod tests {
         let gateway =
             ScriptedAttendanceGateway::new(vec![Ok(Submission::Confirmed), Ok(Submission::NotYet)]);
         let notifier = RecordingNotifier::default();
-        let session = FakeSessionInvalidator::default();
+        let invalidator = FakeSessionInvalidator::default();
         let class = class_from(11, 12);
 
         // When attendance is polled.
@@ -304,7 +303,7 @@ mod tests {
                 clock: &clock,
                 gateway: &gateway,
                 notifier: &notifier,
-                session: &session,
+                invalidator: &invalidator,
                 coordinates: None,
                 zone: &zone(),
                 poll_interval: FAST,
@@ -330,7 +329,7 @@ mod tests {
         let clock = FakeClock::at(hkt("2026-09-21T13:00:00+08:00"));
         let gateway = ScriptedAttendanceGateway::new(vec![Ok(Submission::Confirmed)]);
         let notifier = RecordingNotifier::default();
-        let session = FakeSessionInvalidator::default();
+        let invalidator = FakeSessionInvalidator::default();
         let class = class_from(11, 12);
 
         // When attendance is polled.
@@ -339,7 +338,7 @@ mod tests {
                 clock: &clock,
                 gateway: &gateway,
                 notifier: &notifier,
-                session: &session,
+                invalidator: &invalidator,
                 coordinates: None,
                 zone: &zone(),
                 poll_interval: FAST,
@@ -362,7 +361,7 @@ mod tests {
         let clock = FakeClock::at(hkt("2026-09-21T11:00:00+08:00"));
         let gateway = ScriptedAttendanceGateway::new(vec![Ok(Submission::Confirmed)]);
         let notifier = RecordingNotifier::default();
-        let session = FakeSessionInvalidator::default();
+        let invalidator = FakeSessionInvalidator::default();
         let class = class_from(11, 12);
 
         // When attendance is polled.
@@ -371,7 +370,7 @@ mod tests {
                 clock: &clock,
                 gateway: &gateway,
                 notifier: &notifier,
-                session: &session,
+                invalidator: &invalidator,
                 coordinates: None,
                 zone: &zone(),
                 poll_interval: FAST,
@@ -399,7 +398,7 @@ mod tests {
             Ok(Submission::Confirmed),
         ]);
         let notifier = RecordingNotifier::default();
-        let session = FakeSessionInvalidator::default();
+        let invalidator = FakeSessionInvalidator::default();
         let class = class_from(11, 12);
 
         // When attendance is polled. The clock is advanced by the poll interval
@@ -409,7 +408,7 @@ mod tests {
                 clock: &clock,
                 gateway: &gateway,
                 notifier: &notifier,
-                session: &session,
+                invalidator: &invalidator,
                 coordinates: None,
                 zone: &zone(),
                 poll_interval: FAST,
@@ -423,7 +422,7 @@ mod tests {
         // invalidation the poll would replay a dead session until the class
         // ended and then report a failure.
         assert!(
-            session.invalidations() >= 1,
+            invalidator.invalidations() >= 1,
             "a revoked session must be discarded"
         );
         assert_eq!(outcome, AttendanceOutcome::Confirmed);
@@ -435,7 +434,7 @@ mod tests {
         let clock = FakeClock::at(hkt("2026-09-21T11:30:00+08:00"));
         let gateway = ScriptedAttendanceGateway::new(vec![Ok(Submission::Closed)]);
         let notifier = RecordingNotifier::default();
-        let session = FakeSessionInvalidator::default();
+        let invalidator = FakeSessionInvalidator::default();
         let class = class_from(11, 12);
 
         // When attendance is polled.
@@ -444,7 +443,7 @@ mod tests {
                 clock: &clock,
                 gateway: &gateway,
                 notifier: &notifier,
-                session: &session,
+                invalidator: &invalidator,
                 coordinates: None,
                 zone: &zone(),
                 poll_interval: FAST,
@@ -480,7 +479,7 @@ mod tests {
             20 * 60,
         );
         let notifier = RecordingNotifier::default();
-        let session = FakeSessionInvalidator::default();
+        let invalidator = FakeSessionInvalidator::default();
         let class = class_from(11, 12);
 
         // When attendance is polled until the window closes.
@@ -489,7 +488,7 @@ mod tests {
                 clock: clock.as_ref(),
                 gateway: &gateway,
                 notifier: &notifier,
-                session: &session,
+                invalidator: &invalidator,
                 coordinates: None,
                 zone: &zone(),
                 poll_interval: FAST,
@@ -526,7 +525,7 @@ mod tests {
             5 * 60,
         );
         let notifier = RecordingNotifier::default();
-        let session = FakeSessionInvalidator::default();
+        let invalidator = FakeSessionInvalidator::default();
         let class = class_from(11, 12);
 
         // When attendance is polled until the window closes.
@@ -534,7 +533,7 @@ mod tests {
             clock: clock.as_ref(),
             gateway: &gateway,
             notifier: &notifier,
-            session: &session,
+            invalidator: &invalidator,
             coordinates: None,
             zone: &zone(),
             poll_interval: FAST,

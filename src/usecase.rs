@@ -9,5 +9,5 @@ pub mod mark_attendance;
 #[cfg(test)]
 pub mod test_doubles;
 
-pub use daily_setup::{SetupOutcome, daily_setup};
+pub use daily_setup::{RetryPolicy, SetupOutcome, daily_setup};
 pub use mark_attendance::{AttendanceOutcome, PollParts, mark_attendance};

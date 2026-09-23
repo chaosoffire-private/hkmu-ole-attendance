@@ -117,22 +117,29 @@ git tag v0.3.0 && git push origin v0.3.0
 
 ## Configuration
 
-| Variable           | Default                    | Meaning                                                                |
-| ------------------ | -------------------------- | ---------------------------------------------------------------------- |
-| `SESSION_COOKIE`   | —                          | Raw `Cookie:` header value. Takes precedence over credentials.         |
-| `STUDENT_ID`       | —                          | Student ID used for the SSO login.                                     |
-| `STUDENT_PASSWORD` | —                          | Password used for the SSO login.                                       |
-| `DISCORD_WEBHOOK`  | —                          | Discord webhook URL. When unset, notifications are written to the log. |
-| `SCHEDULE_TIME`    | `03:00`                    | Time of the daily setup, in `HH:MM`.                                   |
-| `TIMEZONE`         | `Asia/Hong_Kong`           | Timezone for all scheduling and class times.                           |
-| `OLE_URL`          | `https://iole.hkmu.edu.hk` | OLE portal base URL.                                                   |
-| `NAM_LOGIN_URL`    | HKMU NAM endpoint          | SSO credential endpoint. Override only for testing.                    |
-| `OLECONNECT_API_URL` | HKMU `oledb` endpoint    | `getTodayClass` API. Override only for testing.                        |
-| `RUST_LOG`         | `info`                     | Log filter, e.g. `debug` for verbose output.                           |
+| Variable                 | Default                    | Meaning                                                                |
+| ------------------------ | -------------------------- | ---------------------------------------------------------------------- |
+| `SESSION_COOKIE`         | —                          | Raw `Cookie:` header value. Takes precedence over credentials.         |
+| `STUDENT_ID`             | —                          | Student ID used for the SSO login.                                     |
+| `STUDENT_PASSWORD`       | —                          | Password used for the SSO login.                                       |
+| `DISCORD_WEBHOOK`        | —                          | Discord webhook URL. When unset, notifications are written to the log. |
+| `SCHEDULE_TIME`          | `03:00`                    | Time of the daily setup, in `HH:MM`.                                   |
+| `TIMEZONE`               | `Asia/Hong_Kong`           | Timezone for all scheduling and class times.                           |
+| `SETUP_RETRY_ATTEMPTS`   | `3`                        | Timetable-fetch attempts before deferring to the next day's run.       |
+| `SETUP_RETRY_DELAY_SECS` | `30`                       | Seconds to wait between those attempts.                                |
+| `OLE_URL`                | `https://iole.hkmu.edu.hk` | OLE portal base URL.                                                   |
+| `NAM_LOGIN_URL`          | HKMU NAM endpoint          | SSO credential endpoint. Override only for testing.                    |
+| `OLECONNECT_API_URL`     | HKMU `oledb` endpoint      | `getTodayClass` API. Override only for testing.                        |
+| `RUST_LOG`               | `info`                     | Log filter, e.g. `debug` for verbose output.                           |
 
 `SCHEDULE_TIME` accepts `H:MM` or `HH:MM`. Trailing `#` comments are stripped,
 so `docker --env-file` inline comments are harmless. An invalid value is
 rejected at startup rather than silently defaulting.
+
+`SETUP_RETRY_ATTEMPTS` and `SETUP_RETRY_DELAY_SECS` control how the daily setup
+handles a transient failure. The defaults retry three times 30 seconds apart; if
+all attempts fail the next try is the following day's run, so raise the delay if
+the network is unreliable around the scheduled time.
 
 ## Command line
 
@@ -163,10 +170,10 @@ Every message goes through the `Notifier` port, so output is structured
 `tracing` output in all cases — there is no separate print path. The
 implementation decides the transport:
 
-| Implementation | Behaviour |
-| --- | --- |
-| `LogNotifier` | Logged only. Used for `--fetch-only` and `--probe` diagnostics. |
-| `DiscordNotifier` | Logged, **then** posted to Discord when a webhook is set. |
+| Implementation    | Behaviour                                                       |
+| ----------------- | --------------------------------------------------------------- |
+| `LogNotifier`     | Logged only. Used for `--fetch-only` and `--probe` diagnostics. |
+| `DiscordNotifier` | Logged, **then** posted to Discord when a webhook is set.       |
 
 Notification is infallible by design: delivery is awaited inside the call, so a
 report is complete once it returns, and a delivery failure is logged and

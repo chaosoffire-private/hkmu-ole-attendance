@@ -23,7 +23,7 @@ use crate::domain::attendance::Submission;
 use crate::domain::geo::Coordinates;
 use crate::domain::schedule::{ScheduledClass, TodayClassResponse};
 use crate::port::error::PortError;
-use crate::port::gateway::ActivityReport;
+use crate::port::gateway::ActivityState;
 use crate::port::{
     AttendanceGateway, Clock, Notice, Notifier, ScheduleGateway, SessionInvalidator,
 };
@@ -109,6 +109,7 @@ impl Notifier for RecordingNotifier {
 pub struct ScriptedAttendanceGateway {
     outcomes: Mutex<VecDeque<Result<Submission, PortError>>>,
     submissions: Mutex<u32>,
+    probes: Mutex<u32>,
     clock: Option<(Arc<FakeClock>, i64)>,
 }
 
@@ -118,6 +119,7 @@ impl ScriptedAttendanceGateway {
         Self {
             outcomes: Mutex::new(outcomes.into()),
             submissions: Mutex::new(0),
+            probes: Mutex::new(0),
             clock: None,
         }
     }
@@ -131,6 +133,7 @@ impl ScriptedAttendanceGateway {
         Self {
             outcomes: Mutex::new(outcomes.into()),
             submissions: Mutex::new(0),
+            probes: Mutex::new(0),
             clock: Some((clock, seconds)),
         }
     }
@@ -139,18 +142,20 @@ impl ScriptedAttendanceGateway {
     pub fn submission_count(&self) -> u32 {
         *self.submissions.lock().expect("gateway lock")
     }
+
+    /// How many times `probe` was called.
+    pub fn probe_count(&self) -> u32 {
+        *self.probes.lock().expect("gateway lock")
+    }
 }
 
 impl AttendanceGateway for ScriptedAttendanceGateway {
     fn probe(
         &self,
         _class: &ScheduledClass,
-    ) -> impl std::future::Future<Output = Result<ActivityReport, PortError>> + Send {
-        *self.submissions.lock().expect("gateway lock") += 1;
-        std::future::ready(Ok(ActivityReport {
-            found: true,
-            open: true,
-        }))
+    ) -> impl std::future::Future<Output = Result<ActivityState, PortError>> + Send {
+        *self.probes.lock().expect("gateway lock") += 1;
+        std::future::ready(Ok(ActivityState::Open))
     }
 
     fn submit(
