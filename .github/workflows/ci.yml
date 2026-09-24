@@ -18,18 +18,25 @@ jobs:
   secrets:
     name: secret scan
     runs-on: ubuntu-latest
+    env:
+      # Pinned: a scanner that can silently change its rules is not a gate.
+      GITLEAKS_VERSION: 8.30.1
     steps:
       - uses: actions/checkout@v4
         with:
           # The full history, so a secret committed in an earlier commit and
           # later deleted is still found.
           fetch-depth: 0
-      # The generic pattern layer. The local .env comparison cannot run here —
-      # CI holds no credentials, and it must not — so this covers the shapes a
-      # general scanner knows: tokens, keys, webhook URLs.
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The gitleaks binary directly rather than gitleaks/gitleaks-action,
+      # which refuses to run for an organization without a paid licence key.
+      # The binary is the same scanner and needs no licence.
+      - name: Install gitleaks
+        run: |
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          ./gitleaks version
+      - name: Scan the full history
+        run: ./gitleaks detect --source . --redact --no-banner --exit-code 1
 
   fmt:
     name: rustfmt
