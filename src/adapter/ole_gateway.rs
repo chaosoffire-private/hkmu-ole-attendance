@@ -23,6 +23,53 @@ fn activities_url(ole_url: &str, class: &ScheduledClass) -> String {
     )
 }
 
+/// Build the URL that records attendance.
+///
+/// The activity page declares its own `take_url`, already carrying
+/// `createdocument` and the document id, so it is preferred: it is what a
+/// browser would request, and it cannot drift from the page's layout.
+///
+/// When the page declared none, the request is built from the class and the
+/// discovered document id. That fallback replaces the page's query rather than
+/// appending to it: `readform&?createdocument` would leave `createdocument` as
+/// part of a parameter value, so the server would answer a read and never see a
+/// create — which is indistinguishable from a closed window.
+fn submit_url(
+    ole_url: &str,
+    class: &ScheduledClass,
+    activity: &Activity,
+    coordinates: Option<Coordinates>,
+) -> Result<String, PortError> {
+    let point = coordinates.unwrap_or(Coordinates::ORIGIN);
+    let suffix = format!("lat={}&lng={}", point.latitude(), point.longitude());
+
+    if let Some(declared) = activity.take_url.as_deref().filter(|u| !u.is_empty()) {
+        let resolved = resolve_url(ole_url, declared)?;
+        return Ok(join_query(&resolved, &suffix));
+    }
+
+    let page = activities_url(ole_url, class);
+    let base = page.split('?').next().unwrap_or(&page);
+    Ok(format!(
+        "{base}?createdocument&puid={}&{suffix}",
+        activity.unid
+    ))
+}
+
+/// Resolve a possibly-relative URL against the portal base.
+fn resolve_url(base: &str, reference: &str) -> Result<String, PortError> {
+    Ok(url::Url::parse(base)
+        .and_then(|parsed| parsed.join(reference))
+        .map_err(|error| PortError::Remote(format!("unusable submit URL {reference}: {error}")))?
+        .to_string())
+}
+
+/// Append `extra` to a URL's query string, using `?` or `&` as required.
+fn join_query(url: &str, extra: &str) -> String {
+    let separator = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{separator}{extra}")
+}
+
 /// Reads the timetable over HTTPS.
 #[derive(Debug)]
 pub struct OleScheduleGateway {
@@ -85,7 +132,6 @@ impl AttendanceGateway for OleAttendanceGateway {
         coordinates: Option<Coordinates>,
     ) -> Result<Submission, PortError> {
         let activity = self.locate(class).await?;
-        let activities = activities_url(&self.ole_url, class);
 
         if !activity.is_attendance() {
             return Err(PortError::Unexpected(format!(
@@ -94,10 +140,11 @@ impl AttendanceGateway for OleAttendanceGateway {
             )));
         }
 
+        let submit_url = submit_url(&self.ole_url, class, &activity, coordinates)?;
         let session = self.cache.session().await?;
         let mut client = OleClient::new(session, self.api_url.clone());
         client
-            .submit_attendance(&activities, &activity.unid, coordinates)
+            .submit_attendance(&submit_url)
             .await
             .map_err(PortError::from)
     }
@@ -150,8 +197,10 @@ impl SessionInvalidator for CacheSessionInvalidator {
 
 #[cfg(test)]
 mod tests {
-    use super::activities_url;
+    use super::{activities_url, submit_url};
+    use crate::domain::geo::Coordinates;
     use crate::domain::schedule::ScheduledClass;
+    use crate::infra::oleconnect::Activity;
     use crate::port::gateway::ActivityState;
 
     fn class() -> ScheduledClass {
@@ -166,6 +215,15 @@ mod tests {
         }
     }
 
+    fn activity(take_url: Option<&str>) -> Activity {
+        Activity {
+            unid: "ABC123".to_owned(),
+            attendance_type: "2".to_owned(),
+            open: true,
+            take_url: take_url.map(ToOwned::to_owned),
+        }
+    }
+
     #[test]
     fn builds_the_class_activities_url_from_the_domain_class() {
         // Given a scheduled class and the portal base.
@@ -175,6 +233,59 @@ mod tests {
             activities_url("https://iole.hkmu.edu.hk/", &class()),
             "https://iole.hkmu.edu.hk/course2604/ELEC3050SEF.nsf//class_activities_student?readform&"
         );
+    }
+
+    #[test]
+    fn prefers_the_submit_url_the_page_declares() {
+        // Given an activity page that declared its own take_url, as the live
+        // page does.
+        let declared =
+            "/course2604/ELEC3050SEF.nsf/class_activities_student?createdocument&puid=ABC";
+
+        // When the submit URL is built.
+        let built = submit_url(
+            "https://iole.hkmu.edu.hk",
+            &class(),
+            &activity(Some(declared)),
+            Some(Coordinates::new(22.3364, 114.1796).expect("valid")),
+        )
+        .expect("builds");
+
+        // Then it is the declared request, resolved against the portal and
+        // carrying the coordinates — not a re-invented path.
+        assert!(
+            built.starts_with(
+                "https://iole.hkmu.edu.hk/course2604/ELEC3050SEF.nsf/class_activities_student?"
+            ),
+            "got {built}"
+        );
+        assert!(built.contains("createdocument"));
+        assert!(built.contains("puid=ABC"));
+        assert!(built.contains("lat=22.3364"));
+        assert!(built.contains("lng=114.1796"));
+    }
+
+    #[test]
+    fn the_fallback_never_asks_to_read_and_create_at_once() {
+        // Given an activity page that declared no take_url.
+        // When the request is built from the class instead.
+        let built = submit_url("https://iole.hkmu.edu.hk", &class(), &activity(None), None)
+            .expect("builds");
+
+        // Then the page's own query is replaced, not appended to. Appending
+        // would produce `readform&?createdocument`, leaving the create as part
+        // of a parameter value: the server answers a read and never records
+        // anything, which looks exactly like a closed window.
+        assert!(
+            !built.contains("readform"),
+            "a read request must not be combined with the create: {built}"
+        );
+        assert_eq!(
+            built.matches('?').count(),
+            1,
+            "a URL carries one query string; two means a parameter value: {built}"
+        );
+        assert!(built.contains("?createdocument&puid=ABC123"), "got {built}");
     }
 
     #[test]

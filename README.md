@@ -18,8 +18,10 @@ use the teacher's **class activities** attendance, this works.
 
 The program authenticates against OLE, asks the `oledb` API for the day's
 timetable, and then — once each class has started — submits attendance on the
-class-activities page, polling every 10 minutes until the submission is
-confirmed or the class ends.
+class-activities page, polling once a minute until the submission is confirmed
+or the class ends. An activity often opens after the class has begun, so early
+attempts are expected to find nothing and the poll keeps trying rather than
+giving up.
 
 Everything is done with ordinary HTTPS requests. There is no headless browser,
 no geckodriver, and no Xvfb; the container is a single statically-linked binary
@@ -117,20 +119,21 @@ git tag v0.3.0 && git push origin v0.3.0
 
 ## Configuration
 
-| Variable                 | Default                    | Meaning                                                                |
-| ------------------------ | -------------------------- | ---------------------------------------------------------------------- |
-| `SESSION_COOKIE`         | —                          | Raw `Cookie:` header value. Takes precedence over credentials.         |
-| `STUDENT_ID`             | —                          | Student ID used for the SSO login.                                     |
-| `STUDENT_PASSWORD`       | —                          | Password used for the SSO login.                                       |
-| `DISCORD_WEBHOOK`        | —                          | Discord webhook URL. When unset, notifications are written to the log. |
-| `SCHEDULE_TIME`          | `03:00`                    | Time of the daily setup, in `HH:MM`.                                   |
-| `TIMEZONE`               | `Asia/Hong_Kong`           | Timezone for all scheduling and class times.                           |
-| `SETUP_RETRY_ATTEMPTS`   | `3`                        | Timetable-fetch attempts before deferring to the next day's run.       |
-| `SETUP_RETRY_DELAY_SECS` | `30`                       | Seconds to wait between those attempts.                                |
-| `OLE_URL`                | `https://iole.hkmu.edu.hk` | OLE portal base URL.                                                   |
-| `NAM_LOGIN_URL`          | HKMU NAM endpoint          | SSO credential endpoint. Override only for testing.                    |
-| `OLECONNECT_API_URL`     | HKMU `oledb` endpoint      | `getTodayClass` API. Override only for testing.                        |
-| `RUST_LOG`               | `info`                     | Log filter, e.g. `debug` for verbose output.                           |
+| Variable                        | Default                    | Meaning                                                                |
+| ------------------------------- | -------------------------- | ---------------------------------------------------------------------- |
+| `SESSION_COOKIE`                | —                          | Raw `Cookie:` header value. Takes precedence over credentials.         |
+| `STUDENT_ID`                    | —                          | Student ID used for the SSO login.                                     |
+| `STUDENT_PASSWORD`              | —                          | Password used for the SSO login.                                       |
+| `DISCORD_WEBHOOK`               | —                          | Discord webhook URL. When unset, notifications are written to the log. |
+| `SCHEDULE_TIME`                 | `03:00`                    | Time of the daily setup, in `HH:MM`.                                   |
+| `TIMEZONE`                      | `Asia/Hong_Kong`           | Timezone for all scheduling and class times.                           |
+| `SETUP_RETRY_ATTEMPTS`          | `3`                        | Timetable-fetch attempts before deferring to the next day's run.       |
+| `SETUP_RETRY_DELAY_SECS`        | `30`                       | Seconds to wait between those attempts.                                |
+| `ATTENDANCE_POLL_INTERVAL_SECS` | `60`                       | Seconds between attendance attempts while a class runs.                |
+| `OLE_URL`                       | `https://iole.hkmu.edu.hk` | OLE portal base URL.                                                   |
+| `NAM_LOGIN_URL`                 | HKMU NAM endpoint          | SSO credential endpoint. Override only for testing.                    |
+| `OLECONNECT_API_URL`            | HKMU `oledb` endpoint      | `getTodayClass` API. Override only for testing.                        |
+| `RUST_LOG`                      | `info`                     | Log filter, e.g. `debug` for verbose output.                           |
 
 `SCHEDULE_TIME` accepts `H:MM` or `HH:MM`. Trailing `#` comments are stripped,
 so `docker --env-file` inline comments are harmless. An invalid value is
@@ -140,6 +143,12 @@ rejected at startup rather than silently defaulting.
 handles a transient failure. The defaults retry three times 30 seconds apart; if
 all attempts fail the next try is the following day's run, so raise the delay if
 the network is unreliable around the scheduled time.
+
+`ATTENDANCE_POLL_INTERVAL_SECS` sets how often attendance is retried while a
+class is running. Each attempt is one HTTP request, so the default of 60 seconds
+costs about two requests per class minute-pair and notices a late-opening window
+quickly. Raise it only if the volume of requests matters more than catching the
+window promptly.
 
 ## Command line
 

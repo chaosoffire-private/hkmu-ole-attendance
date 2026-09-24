@@ -140,9 +140,13 @@ where
             return AttendanceOutcome::Confirmed;
         }
 
+        // A "submission closed" answer is not a reason to stop: it can be a
+        // misread caused by a submission that never reached the create step,
+        // and the window may open later. Polling continues until the class
+        // ends, so a wrong answer costs a request rather than the whole class.
+        // The historical Python never stopped on it either.
         if outcome == Submission::Closed {
-            warn!("the submission window has closed; stopping for this class");
-            break;
+            warn!("the server reported the submission window closed; will keep polling");
         }
 
         info!(%outcome, attempt, "attendance not confirmed yet");
@@ -429,10 +433,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_closed_window_stops_polling_early() {
-        // Given a class in progress whose window has already closed.
-        let clock = FakeClock::at(hkt("2026-09-21T11:30:00+08:00"));
-        let gateway = ScriptedAttendanceGateway::new(vec![Ok(Submission::Closed)]);
+    async fn a_closed_report_does_not_stop_polling() {
+        // Given a class from 11:00 to 12:00 whose submissions all answer
+        // "submission closed", with the clock advancing 20 minutes per poll so
+        // the loop genuinely reaches the end of the class.
+        let clock = Arc::new(FakeClock::at(hkt("2026-09-21T11:10:00+08:00")));
+        let gateway = ScriptedAttendanceGateway::advancing(
+            vec![
+                Ok(Submission::Closed),
+                Ok(Submission::Closed),
+                Ok(Submission::Closed),
+            ],
+            Arc::clone(&clock),
+            20 * 60,
+        );
         let notifier = RecordingNotifier::default();
         let invalidator = FakeSessionInvalidator::default();
         let class = class_from(11, 12);
@@ -440,7 +454,7 @@ mod tests {
         // When attendance is polled.
         let outcome = mark_attendance(
             PollParts {
-                clock: &clock,
+                clock: clock.as_ref(),
                 gateway: &gateway,
                 notifier: &notifier,
                 invalidator: &invalidator,
@@ -454,12 +468,57 @@ mod tests {
         )
         .await;
 
-        // Then it stops after one attempt rather than hammering a closed window.
-        assert_eq!(gateway.submission_count(), 1);
-        assert!(matches!(
-            outcome,
-            AttendanceOutcome::Unconfirmed { attempts: 0 }
-        ));
+        // Then it kept polling past the closed report rather than giving up on
+        // the class. A closed answer can be a misread, and the window may open
+        // later, so abandoning the class on the first one loses the whole
+        // session — the failure this test exists to prevent.
+        assert!(
+            gateway.submission_count() > 1,
+            "a closed report must not end polling: {} submission(s)",
+            gateway.submission_count()
+        );
+        assert!(matches!(outcome, AttendanceOutcome::Unconfirmed { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_closed_report_that_turns_into_a_confirmation_still_confirms() {
+        // Given a class whose first submissions answer "closed" and only then
+        // are accepted, as happens when the window opens late.
+        let clock = Arc::new(FakeClock::at(hkt("2026-09-21T11:10:00+08:00")));
+        let gateway = ScriptedAttendanceGateway::advancing(
+            vec![
+                Ok(Submission::Closed),
+                Ok(Submission::Closed),
+                Ok(Submission::Confirmed),
+            ],
+            Arc::clone(&clock),
+            5 * 60,
+        );
+        let notifier = RecordingNotifier::default();
+        let invalidator = FakeSessionInvalidator::default();
+        let class = class_from(11, 12);
+
+        // When attendance is polled.
+        let outcome = mark_attendance(
+            PollParts {
+                clock: clock.as_ref(),
+                gateway: &gateway,
+                notifier: &notifier,
+                invalidator: &invalidator,
+                coordinates: None,
+                zone: &zone(),
+                poll_interval: FAST,
+                warning_threshold: Duration::from_secs(1800),
+                fallback_duration: Duration::from_secs(10800),
+            },
+            &class,
+        )
+        .await;
+
+        // Then the late success is still recorded, so a closed report early in
+        // the class cannot cause a missed attendance.
+        assert_eq!(outcome, AttendanceOutcome::Confirmed);
+        assert!(notifier.contains("**- Attendance Confirmed!**"));
     }
 
     #[tokio::test]

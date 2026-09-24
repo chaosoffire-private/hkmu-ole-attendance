@@ -21,6 +21,12 @@ pub const DEFAULT_SCHEDULE_TIME: &str = "03:00";
 pub const DEFAULT_SETUP_RETRY_ATTEMPTS: u32 = 3;
 /// Delay between those timetable-retrieval attempts.
 pub const DEFAULT_SETUP_RETRY_DELAY_SECS: u64 = 30;
+/// Default delay between attendance submissions within a class.
+///
+/// One minute, not the ten the historical Python used: an activity can open at
+/// any moment after the class starts, and a ten-minute gap can begin after the
+/// window has already opened and end after it has closed.
+pub const DEFAULT_ATTENDANCE_POLL_INTERVAL_SECS: u64 = 60;
 
 /// How the client authenticates against OLE.
 #[derive(Debug, Clone)]
@@ -175,7 +181,10 @@ impl Config {
             timezone,
             timezone_name,
             credentials,
-            attendance_poll_interval: std::time::Duration::from_secs(600),
+            attendance_poll_interval: env_secs(
+                "ATTENDANCE_POLL_INTERVAL_SECS",
+                DEFAULT_ATTENDANCE_POLL_INTERVAL_SECS,
+            )?,
             warning_threshold: std::time::Duration::from_secs(30 * 60),
             default_class_duration: std::time::Duration::from_secs(3 * 60 * 60),
             setup_retry_attempts: env_count("SETUP_RETRY_ATTEMPTS", DEFAULT_SETUP_RETRY_ATTEMPTS)?,
@@ -278,5 +287,17 @@ mod tests {
         // When parsed.
         // Then it is rejected rather than busy-looping the endpoint.
         assert!(parse_secs("SETUP_RETRY_DELAY_SECS", "0").is_err());
+    }
+
+    #[test]
+    fn the_attendance_poll_interval_is_a_positive_number_of_seconds() {
+        // Given the value the poll interval is parsed from.
+        // When parsed.
+        // Then it is accepted, and a zero is refused so the poll cannot spin.
+        assert_eq!(
+            parse_secs("ATTENDANCE_POLL_INTERVAL_SECS", "30").expect("valid"),
+            std::time::Duration::from_secs(30)
+        );
+        assert!(parse_secs("ATTENDANCE_POLL_INTERVAL_SECS", "0").is_err());
     }
 }

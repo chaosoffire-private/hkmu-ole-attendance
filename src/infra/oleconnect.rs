@@ -6,7 +6,6 @@ use super::html;
 use super::session::HttpSession;
 use super::wire::WireResponse;
 use crate::domain::attendance::Submission;
-use crate::domain::geo::Coordinates;
 use crate::domain::schedule::{ScheduledClass, Timetable};
 use crate::error::{AppError, Result};
 
@@ -22,6 +21,13 @@ pub struct Activity {
     pub attendance_type: String,
     /// Whether the page reports a running submission window.
     pub open: bool,
+    /// The submit URL the page itself declares, as a relative path.
+    ///
+    /// The activity page carries `var take_url = "...?createdocument&puid=..."`,
+    /// which is the request a browser makes to record attendance. It is used in
+    /// preference to a URL built from patterns, because it already names the
+    /// right document and survives a change to the server's page layout.
+    pub take_url: Option<String>,
 }
 
 impl Activity {
@@ -138,21 +144,13 @@ impl OleClient {
 
     /// Submit attendance for an activity using the given coordinates.
     ///
+    /// `submit_url` is the request a browser would make to record attendance,
+    /// carrying both the document to create and the coordinates.
+    ///
     /// # Errors
     /// Propagates transport failures.
-    pub async fn submit_attendance(
-        &mut self,
-        activities_url: &str,
-        unid: &str,
-        coordinates: Option<Coordinates>,
-    ) -> Result<Submission> {
-        let point = coordinates.unwrap_or(Coordinates::ORIGIN);
-        let url = format!(
-            "{activities_url}?createdocument&puid={unid}&lat={}&lng={}",
-            point.latitude(),
-            point.longitude()
-        );
-        let body = self.session.get(&url).await?;
+    pub async fn submit_attendance(&mut self, submit_url: &str) -> Result<Submission> {
+        let body = self.session.get(submit_url).await?;
         let outcome = Submission::classify(&body);
         info!(?outcome, "attendance submission answered");
         Ok(outcome)
@@ -246,6 +244,7 @@ fn activity_from_page(page: &str) -> Option<Activity> {
         unid,
         attendance_type: html::js_var(page, "attendance_type").unwrap_or_default(),
         open: activity_is_open(page),
+        take_url: html::js_var(page, "take_url"),
     })
 }
 
@@ -365,6 +364,7 @@ mod tests {
             unid: "ABC".to_owned(),
             attendance_type: "2".to_owned(),
             open: true,
+            take_url: None,
         };
 
         // When the attendance type is checked.
