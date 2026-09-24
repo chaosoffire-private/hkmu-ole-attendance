@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+#
+# pre-push: refuse to push a secret.
+#
+# The pre-commit hook only sees the index, and a commit can be made with
+# --no-verify or by a tool that does not run hooks. This scans the commits
+# actually being pushed, so a history that already carries a secret cannot
+# leave the machine.
+#
+# Receives "<local ref> <local sha> <remote ref> <remote sha>" per ref on stdin.
+#
+# Bypass a false positive once with:  git push --no-verify
+# Prefer adding the pattern to .gitleaks.toml instead.
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+zero=0000000000000000000000000000000000000000
+
+status=0
+# A deletion pushes no content, so it is skipped. Each remaining ref is scanned
+# from what the remote already has (remote sha) to what it will receive.
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+    [ "$local_sha" = "$zero" ] && continue
+    if ! "$repo_root/scripts/scan-secrets.sh" pushed "$remote_sha" "$local_sha"; then
+        status=1
+    fi
+done
+
+exit "$status"

@@ -12,7 +12,7 @@ use tokio::time::sleep;
 use tracing::{error, info, instrument, warn};
 
 use crate::adapter::{
-    CacheSessionInvalidator, DiscordNotifier, LogNotifier, OleAttendanceGateway,
+    BroadcastNotifier, CacheSessionInvalidator, DiscordNotifier, LogNotifier, OleAttendanceGateway,
     OleScheduleGateway, SystemClock,
 };
 use crate::config::Config;
@@ -33,7 +33,7 @@ pub enum Report {
     /// Written to the log only.
     Log,
     /// Written to the log, and posted to Discord when a webhook is configured.
-    Discord,
+    All,
 }
 
 /// Builds the adapters once and drives every use case over them.
@@ -41,6 +41,7 @@ pub struct App {
     config: Arc<Config>,
     cache: SessionCache,
     coordinates: Option<Coordinates>,
+    notifier: Arc<BroadcastNotifier>,
 }
 
 impl std::fmt::Debug for App {
@@ -56,10 +57,12 @@ impl App {
     /// Build the application, ready to run any entry point.
     pub fn new(config: Config, coordinates: Option<Coordinates>) -> Self {
         let cache = SessionCache::new(config.clone());
+        let notifier = Arc::new(notifiers(&config));
         Self {
             config: Arc::new(config),
             cache,
             coordinates,
+            notifier,
         }
     }
 
@@ -67,13 +70,12 @@ impl App {
     ///
     /// Never returns: after each cycle it sleeps until the next scheduled run.
     pub async fn run_scheduler(&self) {
-        let notifier = Arc::new(self.discord_notifier());
-        if !notifier.is_enabled() {
+        if self.config.discord_webhook.is_none() {
             warn!("DISCORD_WEBHOOK is unset; notifications will be logged instead");
         }
         let clock = SystemClock;
 
-        if let Err(error) = self.run_setup_cycle(&notifier).await {
+        if let Err(error) = self.run_setup_cycle().await {
             warn!(%error, "initial setup failed; the daily timer will retry");
         }
 
@@ -88,7 +90,7 @@ impl App {
             );
             sleep(wait).await;
 
-            if let Err(error) = self.run_setup_cycle(&notifier).await {
+            if let Err(error) = self.run_setup_cycle().await {
                 // `daily_setup` has already notified and logged the failure, so
                 // this only records that the run as a whole did not complete.
                 warn!(%error, "daily setup failed; the daily timer will retry");
@@ -102,7 +104,7 @@ impl App {
     /// Returns the first fatal error from the fetch.
     pub async fn fetch_once(&self, report: Report) -> PortResult<()> {
         match report {
-            Report::Discord => self.report_timetable(&self.discord_notifier()).await,
+            Report::All => self.report_timetable(self.notifier.as_ref()).await,
             Report::Log => self.report_timetable(&LogNotifier).await,
         }
     }
@@ -172,14 +174,14 @@ impl App {
     }
 
     /// Run one full setup cycle: fetch, report, then schedule each class.
-    #[instrument(skip(self, notifier), fields(mode = self.config.credentials.label()))]
-    async fn run_setup_cycle(&self, notifier: &Arc<DiscordNotifier>) -> PortResult<SetupOutcome> {
+    #[instrument(skip(self), fields(mode = self.config.credentials.label()))]
+    async fn run_setup_cycle(&self) -> PortResult<SetupOutcome> {
         info!("starting daily attendance setup");
         let clock = SystemClock;
         let outcome = daily_setup(
             &clock,
             &self.schedule_gateway(),
-            notifier.as_ref(),
+            self.notifier.as_ref(),
             &self.invalidator(),
             &self.config.timezone,
             self.retry_policy(),
@@ -188,22 +190,17 @@ impl App {
 
         if let SetupOutcome::Ready(schedule) = &outcome {
             info!(classes = schedule.classes.len(), "scheduling attendance");
-            self.run_attendance_tasks(notifier, schedule.classes.clone())
-                .await;
+            self.run_attendance_tasks(schedule.classes.clone()).await;
         }
         Ok(outcome)
     }
 
     /// Spawn one polling task per class and wait for every task to finish.
-    async fn run_attendance_tasks(
-        &self,
-        notifier: &Arc<DiscordNotifier>,
-        classes: Vec<ScheduledClass>,
-    ) {
+    async fn run_attendance_tasks(&self, classes: Vec<ScheduledClass>) {
         let mut set = JoinSet::new();
         for class in classes {
             let config = Arc::clone(&self.config);
-            let notifier = Arc::clone(notifier);
+            let notifier = Arc::clone(&self.notifier);
             let gateway = self.attendance_gateway();
             let invalidator = self.invalidator();
             let coordinates = self.coordinates;
@@ -267,16 +264,20 @@ impl App {
     fn invalidator(&self) -> CacheSessionInvalidator {
         CacheSessionInvalidator::new(self.cache.clone())
     }
+}
 
-    /// A Discord notifier built from the configured webhook, if any.
-    fn discord_notifier(&self) -> DiscordNotifier {
-        DiscordNotifier::new(
-            self.config
-                .discord_webhook
-                .as_ref()
-                .map(|secret| secret.expose().to_owned()),
-        )
+/// Assemble the destinations notifications are delivered to.
+///
+/// Logging is always present; Discord joins it only when a webhook is
+/// configured. Whether a transport exists is decided here, at assembly, so the
+/// transports themselves stay unconditional. Any further `Notifier` joins the
+/// same list without the broadcast needing to know its type.
+fn notifiers(config: &Config) -> BroadcastNotifier {
+    let mut destinations: Vec<Box<dyn Notifier>> = vec![Box::new(LogNotifier)];
+    if let Some(webhook) = &config.discord_webhook {
+        destinations.push(Box::new(DiscordNotifier::new(webhook.expose().to_owned())));
     }
+    BroadcastNotifier::new(destinations)
 }
 
 /// Report one probe result at the severity it deserves.

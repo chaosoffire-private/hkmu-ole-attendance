@@ -92,12 +92,16 @@ impl RecordingNotifier {
 }
 
 impl Notifier for RecordingNotifier {
-    fn notify(&self, level: Notice, message: &str) -> impl std::future::Future<Output = ()> + Send {
+    fn notify<'a>(
+        &'a self,
+        level: Notice,
+        message: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         self.notices
             .lock()
             .expect("notifier lock")
             .push((level, message.to_owned()));
-        std::future::ready(())
+        Box::pin(std::future::ready(()))
     }
 }
 

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+#
+# pre-commit: refuse to commit a secret.
+#
+# Scans the staged index (not the working tree) so what is checked is exactly
+# what would be committed. Catches, among other things, a real student ID left
+# in a test fixture — the leak this repository actually suffered.
+#
+# Bypass a false positive once with:  git commit --no-verify
+# Prefer adding the pattern to .gitleaks.toml instead.
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+exec "$repo_root/scripts/scan-secrets.sh" staged

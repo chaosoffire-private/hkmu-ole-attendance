@@ -15,6 +15,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The full history, so a secret committed in an earlier commit and
+          # later deleted is still found.
+          fetch-depth: 0
+      # The generic pattern layer. The local .env comparison cannot run here —
+      # CI holds no credentials, and it must not — so this covers the shapes a
+      # general scanner knows: tokens, keys, webhook URLs.
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest

@@ -167,13 +167,25 @@ reports whether its window is open; it never submits attendance.
 ## Reporting and notifications
 
 Every message goes through the `Notifier` port, so output is structured
-`tracing` output in all cases — there is no separate print path. The
-implementation decides the transport:
+`tracing` output in all cases — there is no separate print path. Each transport
+does one thing, and a `BroadcastNotifier` delivers to whichever are assembled:
 
-| Implementation    | Behaviour                                                       |
-| ----------------- | --------------------------------------------------------------- |
-| `LogNotifier`     | Logged only. Used for `--fetch-only` and `--probe` diagnostics. |
-| `DiscordNotifier` | Logged, **then** posted to Discord when a webhook is set.       |
+| Implementation      | Behaviour                                                        |
+| ------------------- | ---------------------------------------------------------------- |
+| `LogNotifier`       | Logged only.                                                     |
+| `DiscordNotifier`   | Posted to Discord only.                                          |
+| `BroadcastNotifier` | Delivers to every destination it holds, concurrently by default. |
+
+`BroadcastNotifier` is itself a `Notifier` and holds a `Vec<Box<dyn Notifier>>`,
+so it can hold any implementation — including another `BroadcastNotifier`. Which
+transports are present is decided when the notifier set is assembled: logging is
+always among them, and Discord joins only when a webhook is set. The `--probe`
+and `--fetch-only` diagnostics are logged only.
+
+Two delivery styles are available: `notify_all` runs the destinations
+concurrently, and `notify_in_order` runs them in the order given. The `Notifier`
+port has a single entry point and takes the concurrent path, since the
+destinations used here are independent.
 
 Notification is infallible by design: delivery is awaited inside the call, so a
 report is complete once it returns, and a delivery failure is logged and
@@ -201,3 +213,40 @@ cargo test
 
 The crate denies `unwrap`, `expect`, `panic`, `todo`, `unimplemented`, and
 slice indexing, so those constructs cannot reach production code.
+
+### Secret scanning
+
+Real credentials must never reach a commit. Two hooks enforce that, in two
+layers:
+
+| Layer      | Catches                                                                  |
+| ---------- | ------------------------------------------------------------------------ |
+| `gitleaks` | Generic secret shapes — tokens, private keys, webhook URLs.              |
+| `.env`     | This project's own live values, read at run time and compared literally. |
+
+The second layer exists because no general scanner knows that a student ID
+belongs to a person: it looks like ordinary text. Only a comparison against the
+known real value catches it. The scanner reads `.env` (gitignored) at run time
+and contains no secret itself, so it is safe to commit and publish.
+
+Install the hooks once per clone:
+
+```bash
+scripts/install-hooks.sh
+```
+
+This points `core.hooksPath` at `.githooks/`, so every clone that runs it shares
+the same hooks. `pre-commit` scans the staged index; `pre-push` scans the
+commits being pushed, so a history that already carries a secret cannot leave
+the machine. To scan on demand:
+
+```bash
+scripts/scan-secrets.sh staged     # what a commit would introduce
+scripts/scan-secrets.sh worktree   # every tracked file on disk
+scripts/scan-secrets.sh history    # the entire reachable history
+```
+
+A false positive can be bypassed once with `git commit --no-verify` or
+`git push --no-verify`; prefer teaching `gitleaks` the pattern instead. CI runs
+the `gitleaks` layer over the full history on every push, where the `.env` layer
+cannot run — CI holds no credentials, and it must not.

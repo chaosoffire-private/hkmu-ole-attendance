@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     }
     if cli.fetch_only || cli.notify_only {
         let report = if cli.notify_only {
-            Report::Discord
+            Report::All
         } else {
             Report::Log
         };

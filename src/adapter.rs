@@ -10,5 +10,5 @@ pub mod notifier;
 pub mod ole_gateway;
 
 pub use clock::SystemClock;
-pub use notifier::{DiscordNotifier, LogNotifier};
+pub use notifier::{BroadcastNotifier, DiscordNotifier, LogNotifier};
 pub use ole_gateway::{CacheSessionInvalidator, OleAttendanceGateway, OleScheduleGateway};
