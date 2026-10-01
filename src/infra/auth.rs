@@ -55,7 +55,7 @@ impl Authenticator {
 
     /// Seed a session from a raw `Cookie:` header value and validate it.
     async fn seed_session_cookie(&self, raw: &str) -> Result<HttpSession> {
-        let mut session = HttpSession::new()?;
+        let mut session = HttpSession::with_proxy(self.config.proxy_url.as_ref())?;
         let mut count = 0_usize;
 
         for entry in raw.split(';') {
@@ -94,7 +94,7 @@ impl Authenticator {
 
     /// Drive the full NAM -> Domino SSO chain with a username and password.
     async fn via_sso(&self, student_id: &str, password: &str) -> Result<HttpSession> {
-        let mut session = HttpSession::new()?;
+        let mut session = HttpSession::with_proxy(self.config.proxy_url.as_ref())?;
         self.fetch_landing_page(&mut session).await?;
         let credentials_form = self
             .submit_credentials(&mut session, student_id, password)

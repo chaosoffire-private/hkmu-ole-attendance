@@ -63,6 +63,12 @@ pub struct Config {
     pub oleconnect_api_url: String,
     /// Discord webhook, when notifications are enabled.
     pub discord_webhook: Option<Secret>,
+    /// Proxy for the OLE requests, as a reqwest proxy URL.
+    ///
+    /// Passed to reqwest verbatim, so its scheme (`http`, `https`, `socks4`,
+    /// `socks4a`, `socks5`, `socks5h`) selects the transport. The Discord
+    /// webhook is deliberately not proxied.
+    pub proxy_url: Option<Secret>,
     /// Wall-clock time to run the daily setup.
     pub schedule_time: TimeOfDay,
     /// Timezone used for all scheduling and class-time comparisons.
@@ -177,6 +183,7 @@ impl Config {
             nam_login_url: env_or("NAM_LOGIN_URL", DEFAULT_NAM_LOGIN_URL),
             oleconnect_api_url: env_or("OLECONNECT_API_URL", DEFAULT_OLECONNECT_API_URL),
             discord_webhook: env_opt("DISCORD_WEBHOOK").map(Secret::new),
+            proxy_url: env_opt("PROXY_URL").map(Secret::new),
             schedule_time: TimeOfDay::parse(&env_or("SCHEDULE_TIME", DEFAULT_SCHEDULE_TIME))?,
             timezone,
             timezone_name,

@@ -237,6 +237,7 @@ mod tests {
             nam_login_url: String::new(),
             oleconnect_api_url: String::new(),
             discord_webhook: None,
+            proxy_url: None,
             schedule_time: TimeOfDay::parse("03:00").expect("valid"),
             timezone: jiff::tz::TimeZone::get("Asia/Hong_Kong").expect("valid tz"),
             timezone_name: "Asia/Hong_Kong".to_owned(),

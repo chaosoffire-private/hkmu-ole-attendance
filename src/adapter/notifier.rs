@@ -140,6 +140,10 @@ async fn post_to_webhook(webhook: &str, message: &str) -> Result<(), String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .https_only(true)
+        // The webhook is never proxied, whatever the environment asks for:
+        // reqwest otherwise reads HTTP(S)_PROXY/ALL_PROXY on its own, which
+        // would route the webhook — itself a credential — through a proxy.
+        .no_proxy()
         .build()
         .map_err(|error| error.to_string())?;
 

@@ -2,13 +2,14 @@
 
 use std::time::Duration;
 
-use reqwest::{Client, Method, Response, redirect};
+use reqwest::{Client, Method, Proxy, Response, redirect};
 use serde::de::DeserializeOwned;
 use tracing::debug;
 use url::Url;
 
 use super::cookie::CookieStore;
 use crate::error::{AppError, Result};
+use crate::secret::Secret;
 
 /// A browser-like User-Agent; the OLE front ends reject some default clients.
 pub const USER_AGENT: &str = "Mozilla/5.0 (Linux; Android 16; Pixel 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36";
@@ -33,27 +34,63 @@ pub struct HttpSession {
 }
 
 impl HttpSession {
-    /// Build a session with an empty jar.
+    /// Build a session with an empty jar and no proxy.
     ///
     /// # Errors
     /// Returns [`AppError::Http`] if the TLS/HTTP client cannot be constructed.
     pub fn new() -> Result<Self> {
-        Self::with_cookies(CookieStore::default())
+        Self::with_cookies(CookieStore::default(), None)
     }
 
-    /// Build a session around an existing jar.
+    /// Build a session with an empty jar, routing OLE traffic through `proxy`.
+    ///
+    /// `proxy` is a reqwest proxy URL whose scheme (`http`, `https`, `socks4`,
+    /// `socks4a`, `socks5`, `socks5h`) selects the transport. A value that is
+    /// not a URL, or whose scheme reqwest does not implement, is rejected here
+    /// rather than at the first request — reqwest would otherwise accept it and
+    /// silently route around it.
     ///
     /// # Errors
-    /// Returns [`AppError::Http`] if the TLS/HTTP client cannot be constructed.
-    pub fn with_cookies(cookies: CookieStore) -> Result<Self> {
-        let client = Client::builder()
+    /// Returns [`AppError::Config`] when the proxy URL cannot be parsed or its
+    /// scheme is unsupported, or [`AppError::Http`] if the TLS/HTTP client
+    /// cannot be constructed.
+    pub fn with_proxy(proxy: Option<&Secret>) -> Result<Self> {
+        Self::with_cookies(CookieStore::default(), proxy)
+    }
+
+    /// Build a session around an existing jar, optionally via a proxy.
+    ///
+    /// # Errors
+    /// Returns [`AppError::Config`] when `proxy` cannot be parsed, or
+    /// [`AppError::Http`] if the TLS/HTTP client cannot be constructed.
+    pub fn with_cookies(cookies: CookieStore, proxy: Option<&Secret>) -> Result<Self> {
+        let mut builder = Client::builder()
             .user_agent(USER_AGENT)
             .timeout(Duration::from_secs(TIMEOUT_SECS))
             .redirect(redirect::Policy::none())
             .https_only(true)
-            .pool_max_idle_per_host(8)
-            .build()
-            .map_err(AppError::Http)?;
+            .pool_max_idle_per_host(8);
+        if let Some(proxy) = proxy {
+            let url = Url::parse(proxy.expose())
+                .map_err(|error| AppError::Config(format!("invalid PROXY_URL: {error}")))?;
+            // reqwest accepts any scheme here and then silently ignores a proxy
+            // it does not implement, so traffic would go direct without a word.
+            // Reject it instead: the point of the proxy is that it is used.
+            if !matches!(
+                url.scheme(),
+                "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
+            ) {
+                return Err(AppError::Config(format!(
+                    "unsupported PROXY_URL scheme {:?}: use http, https, socks4, socks4a, socks5 or socks5h",
+                    url.scheme()
+                )));
+            }
+            let proxy = Proxy::all(url).map_err(|error| {
+                AppError::Config(format!("invalid PROXY_URL: {}", error.without_url()))
+            })?;
+            builder = builder.proxy(proxy);
+        }
+        let client = builder.build().map_err(AppError::Http)?;
         Ok(Self { client, cookies })
     }
 
@@ -196,6 +233,7 @@ fn is_allowed_host(target: &str) -> bool {
 mod tests {
     use super::{HttpSession, is_allowed_host};
     use crate::infra::cookie::Cookie;
+    use crate::secret::Secret;
 
     #[test]
     fn allows_redirects_within_the_university() {
@@ -242,5 +280,55 @@ mod tests {
         // Then the cookie is withheld externally and supplied internally.
         assert!(session.cookies().header_for(&external).is_empty());
         assert_eq!(session.cookies().header_for(&internal), "LtpaToken=secret");
+    }
+
+    #[test]
+    fn builds_without_a_proxy() {
+        // Given no proxy configured.
+        // When a session is built.
+        // Then it succeeds, so the proxy stays optional.
+        assert!(HttpSession::with_proxy(None).is_ok());
+    }
+
+    #[test]
+    fn accepts_the_proxy_schemes_reqwest_implements() {
+        // Given proxy URLs for each transport reqwest understands.
+        // When a session is built with each.
+        // Then each is accepted, so a configured proxy cannot silently vanish.
+        for url in [
+            "http://127.0.0.1:8080",
+            "https://127.0.0.1:8443",
+            "socks4://127.0.0.1:1080",
+            "socks4a://127.0.0.1:1080",
+            "socks5://127.0.0.1:1080",
+            "socks5h://127.0.0.1:1080",
+        ] {
+            assert!(
+                HttpSession::with_proxy(Some(&Secret::new(url))).is_ok(),
+                "{url} should build"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_malformed_proxy_url() {
+        // Given a value that is not a URL at all.
+        // When a session is built with it.
+        // Then it is refused at construction, so a typo is caught at startup.
+        assert!(HttpSession::with_proxy(Some(&Secret::new("not a url"))).is_err());
+    }
+
+    #[test]
+    fn rejects_a_proxy_scheme_reqwest_would_silently_ignore() {
+        // Given a scheme reqwest does not implement, which it would otherwise
+        // drop without a word and send the request direct.
+        // When a session is built with it.
+        // Then it is refused, so a misconfigured proxy cannot silently vanish.
+        for url in ["socks://127.0.0.1:1080", "ftp://127.0.0.1:21"] {
+            assert!(
+                HttpSession::with_proxy(Some(&Secret::new(url))).is_err(),
+                "{url} should be refused"
+            );
+        }
     }
 }
