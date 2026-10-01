@@ -250,7 +250,7 @@ fn activity_from_page(page: &str) -> Option<Activity> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Activity, activity_from_page, expected_class_id, task_links};
+    use super::{Activity, TaskLink, activity_from_page, expected_class_id, task_links};
     use crate::domain::schedule::ScheduledClass;
 
     #[test]
@@ -310,7 +310,7 @@ mod tests {
 
         // When the task list is parsed.
         // Then nothing is collected.
-        assert!(task_links(page).is_empty());
+        assert_eq!(task_links(page), [] as [TaskLink; 0]);
     }
 
     #[test]

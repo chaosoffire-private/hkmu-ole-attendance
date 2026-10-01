@@ -211,7 +211,8 @@ mod tests {
     use jiff::civil::date;
 
     use super::{
-        Course, DaySchedule, Outcome, Session, Timetable, format_classes_message, select_day,
+        Course, DaySchedule, Outcome, ScheduledClass, Session, Timetable, format_classes_message,
+        select_day,
     };
 
     /// A timetable whose single course carries `sessions`.
@@ -391,6 +392,6 @@ mod tests {
 
         // Then it is a success with no classes, not a failure.
         assert!(schedule.is_success());
-        assert!(schedule.classes.is_empty());
+        assert_eq!(schedule.classes, [] as [ScheduledClass; 0]);
     }
 }

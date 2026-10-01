@@ -278,7 +278,7 @@ mod tests {
             url::Url::parse("https://oleconnect.hkmu.edu.hk/oledb/api/x").expect("valid URL");
 
         // Then the cookie is withheld externally and supplied internally.
-        assert!(session.cookies().header_for(&external).is_empty());
+        assert_eq!(session.cookies().header_for(&external), "");
         assert_eq!(session.cookies().header_for(&internal), "LtpaToken=secret");
     }
 
